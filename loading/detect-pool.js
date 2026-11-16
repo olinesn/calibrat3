@@ -72,22 +72,26 @@ export class DetectorPool {
 
     /**
      * Detect on one image. `image` (VideoFrame or ImageBitmap) is TRANSFERRED
-     * to the worker and closed there.
+     * to the worker and closed there. Instead of `image`, `gray` (a Uint8Array of
+     * width*height luma bytes, the command line's ffmpeg frames) is transferred.
      * @returns {Promise<{frame, view, ids:Int32Array, corners:Float32Array, numMarkers, ms, timings, thumb:Blob|null}>}
      */
-    detect({ frame, view, image, width, height, wantThumb = false, thumbWidth = 160 }) {
+    detect({ frame, view, image, gray, width, height, wantThumb = false, thumbWidth = 160 }) {
         if (!this.boardKey) return Promise.reject(new Error('DetectorPool: configure(board) first'));
         let idx = 0;
         for (let i = 1; i < this.workers.length; i++) if (this.inFlight[i] < this.inFlight[idx]) idx = i;
         const requestId = this.nextId++;
+        const msg = gray
+            ? { type: 'detect', requestId, frame, view, gray, width, height }
+            : { type: 'detect', requestId, frame, view, image, width, height, wantThumb, thumbWidth };
         return new Promise((resolve, reject) => {
             this.pending.set(requestId, { resolve, reject, workerIdx: idx });
             this.inFlight[idx]++;
             try {
-                this.workers[idx].postMessage({ type: 'detect', requestId, frame, view, image, width, height, wantThumb, thumbWidth }, [image]);
+                this.workers[idx].postMessage(msg, [gray ? gray.buffer : image]);
             } catch (e) {
                 // Some ImageBitmaps/VideoFrames may not be transferable in this context: fall back to clone.
-                try { this.workers[idx].postMessage({ type: 'detect', requestId, frame, view, image, width, height, wantThumb, thumbWidth }); }
+                try { this.workers[idx].postMessage(msg); }
                 catch (e2) { this.pending.delete(requestId); this.inFlight[idx]--; reject(e2); }
             }
         });

@@ -54,7 +54,9 @@ greedy grid-coverage subset; `coverageFraction`. Imports: none.
 `calibrateCameraExtended`; `reprojectFrames(cv, K, dist, samples, board)` solvePnP +
 pure-JS reprojection per frame; `computeIntrinsicsForCamera(cv, allSamples, imageSize,
 board, {minCorners, exclusions, maxFrames, flags, onProgress})` = filter → select →
-calibrate → evaluate all valid frames. Imports: board, frame-selection, geometry.
+calibrate → evaluate all valid frames. Also (no `cv`): `distortionFlags(model)` (the
+`Distortion model` choice → calibrateCamera flags), `intrinsicsSamples(store, view)` (a
+view's frames with ≥ 4 corners). Imports: board, frame-selection, geometry.
 
 ### calib/extrinsics.js  (needs `cv`)
 `solveBoardPose`, `computeRelativePoses(cv, store, graph, chain, intrinsics, board, opts)`
@@ -87,6 +89,18 @@ rigidity term is off. Also exports `projectWithJacobian`. Imports: geometry, boa
 `outlierSchedule(start, end, rounds)`, `sbaReferenceIndex`, `applySbaResults(result,
 input, intrinsics, extrinsics)` → new arrays, `pairErrorBounds`, `DEFAULT_SBA_CONFIG`
 (engine `js`, model `fxfy-c-k1-k2`, loss none). Imports: geometry.
+
+### calib/refine.js
+Bundle-adjustment orchestration shared by the app (`ui/stage-extrinsics.js` runSba) and
+the command line. `refineCalibration({intrinsics, extrinsics, reproj, initialSummary,
+imageSizes, viewNames, board, referenceView, excludedFrames, options, reproject, solve,
+log, progress, onLiveCost})` → `{improved, best, attempts, s0, schedule}`: anipose-style
+start point, threshold schedule, rounds of reject → solve → re-triangulate
+(`sbaAttempt`), model selection; the expensive steps come in as callbacks (the calib
+worker's `reprojection` / `sba` requests). `sbaResultRecord(refined)` = the
+`state.sbaResult` record; `reevaluatePerFrame(intrinsics, store, board, request)` re-solves
+per-frame poses with refined intrinsics; `DEFAULT_REFINE_OPTIONS` (the SBA panel's
+defaults); `fmtMs`. Imports: sba, geometry.
 
 ### calib/initialization.js
 `initApp()` — wires log panel, stages, video panel, loaders (sample / folder / saved
@@ -198,10 +212,11 @@ samples' when the header says 0. Exports: `readSampleTable`, `completeSamples`,
 `importScripts` opencv.js; caches dictionary/board/detectors per board key; `detect`
 draws the transferred VideoFrame/ImageBitmap to an OffscreenCanvas, runs
 `detectMarkers` + `detectBoard`, optional JPEG thumbnail; replies with transferred
-typed arrays.
+typed arrays. A `detect` message with `gray` (Uint8Array luma, the command line's
+ffmpeg frames) instead of `image` skips the canvas.
 
 ### loading/detect-pool.js
-`DetectorPool({size, log})` — `init`, `configure(board)`, `detect({frame, view, image,
+`DetectorPool({size, log})` — `init`, `configure(board)`, `detect({frame, view, image | gray,
 width, height, wantThumb})` → Promise, least-loaded dispatch, `stats`, `terminate`.
 
 ### loading/calib-worker.js  (classic worker)
@@ -226,7 +241,9 @@ intrinsics run in parallel; `init`, `request(type, payload, {onProgress})`, `ter
 ## import-export/
 
 ### import-export/toml.js
-`generateCalibrationToml(cameras, meta)`, `parseCalibrationToml`, `generateBoardToml`,
+`calibrationTomlFromResults({viewNames, intrinsics, extrinsics, referenceView, board,
+sessionName, sampledFrames, refinedBySba, reproj})` (the Export stage's TOML, shared with
+the command line), `generateCalibrationToml(cameras, meta)`, `parseCalibrationToml`, `generateBoardToml`,
 `parseBoardToml`, `parseSimpleToml`, `parseTomlTables`. Imports: calib/board.
 
 ### import-export/sba-json.js
@@ -239,6 +256,37 @@ SBA + reprojection metadata (flat arrays). Imports: calib/board.
 
 ---
 
+## cli/ — command line (Node only)
+
+### cli/calibrate.mjs
+`node cli/calibrate.mjs <session-folder> --out calibration.toml [...]` — the app's pipeline
+without a browser: scan the folder (`buildSession`), probe each video, stride the frames
+(`stridedFrames`), batch detection (DetectorPool, gray frames from ffmpeg), intrinsics /
+extrinsics / reprojection (CalibWorker requests), `refineCalibration`, then
+`calibrationTomlFromResults`; optional `--session-out` (`serializeSession`) and `--report`
+(JSON). Same defaults as the app's form. `--help` lists every option.
+
+### cli/ffmpeg-video.mjs
+`probeVideo(file)` — the app's frame table (sample-table.js + mp4box: count, size, fps,
+B-frames), plus ffprobe's decoded size; `grayFrames(file, {width, height, totalFrames,
+wanted, threads})` — async generator of `{frame, gray}` from `ffmpeg -ignore_editlist 1
+-noautorotate -fps_mode passthrough -pix_fmt gray -f rawvideo`, back-pressured, checks that
+ffmpeg emitted one picture per sample; `grayFrameAt(file, seconds)` (board-pattern probe);
+`ffmpegVersion`.
+
+### cli/web-worker.mjs, cli/worker-host.mjs
+`NodeWebWorker` / `installWebWorker()` — the browser `Worker` API over `worker_threads`, so
+DetectorPool / CalibWorker and `loading/detect-worker.js` / `loading/calib-worker.js` run
+unchanged. The host provides `self`, `location`, `postMessage`, `onmessage`, `close`,
+`importScripts` (classic-script eval, plus a `require` for Emscripten's Node probe) and
+`fetch` for `file:` URLs (sba-solver-wasm's .wasm), then `import()`s the worker script.
+
+### cli/spock-calibrate.sbatch
+Slurm job template: `module load ffmpeg/6.1`, Node from `~/opt/node-*/bin`, runs calibrate.mjs
+with `--session-out` / `--report` next to the TOML.
+
+---
+
 ## tests/
 - `harness.mjs` — environment-agnostic `test/run/assert/approx/loadText`; reports to
   `globalThis.__calibrat3TestReporter` when the browser runner installs one, else console.
@@ -247,8 +295,13 @@ SBA + reprojection metadata (flat arrays). Imports: calib/board.
   (`/tests/test-runner.html`, also on GitHub Pages).
 - `test-board`, `test-geometry`, `test-detection-store`, `test-covisibility`,
   `test-frame-selection`, `test-folder-loader`, `test-sba`, `test-toml`.
+- `cli/test-ffmpeg-frames.mjs` (Node only, needs ffmpeg) — ffmpeg frame N is the app's frame N
+  on B-frame videos (H.264, fragmented H.264, fragmented HEVC) whose frames show their own
+  number as a barcode (`cli/barcode-video.mjs`).
 - `e2e/smoke-pipeline.mjs`, `e2e/stress-synthetic.mjs`, `e2e/real-session.mjs` — Playwright,
-  headless Chromium, real workers/WebCodecs/WASM. See `e2e/README.md`.
+  headless Chromium, real workers/WebCodecs/WASM. `e2e/cli-parity.mjs` — the command line vs
+  the app on the same session (frame numbering, pixels, detections, calibration). See
+  `e2e/README.md`.
 
 ## scripts/
 - `make_synthetic_session.py` — renders an N-camera, M-frame synthetic ChArUco session

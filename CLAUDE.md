@@ -20,6 +20,8 @@ modules served as static files, deployed to GitHub Pages from `main`. Port of th
   `calib-worker.js`) and their main-thread clients (`detect-pool.js`, `calib-client.js`),
   `folder-loader.js` (session folder layouts), `opencv-ready.js`.
 - `import-export/` — `toml.js` (sleap-anipose format), `sba-json.js`, `session-save.js`.
+- `cli/` — the command line (Node only): `calibrate.mjs`, `ffmpeg-video.mjs`, and a Web Worker
+  API over `worker_threads` (`web-worker.mjs`, `worker-host.mjs`). See "Command line" below.
 
 See `MODULES.md` for every module's purpose/exports/dependents.
 
@@ -71,6 +73,45 @@ rendered, detected on the main thread and appended DOM per frame. Here:
    grid-bucketed hover index, galleries capped at 40 cards with lazy thumbnails.
    `log-panel.js` is a ring buffer flushed once per animation frame; `debug`-level
    lines render only with the verbose toggle.
+
+### Command line (`cli/calibrate.mjs`) — same code, ffmpeg frames
+
+For clusters (Spock: Rocky Linux, no GPU decode, headless Chromium cannot decode HEVC) the
+pipeline runs in plain Node. Nothing is re-implemented: `cli/web-worker.mjs` installs a
+`Worker` global backed by `worker_threads`, so `DetectorPool` / `CalibWorker` spawn the app's
+own `loading/detect-worker.js` / `loading/calib-worker.js`; `cli/worker-host.mjs` gives those
+scripts `self`, `location`, `postMessage`/`onmessage`, `importScripts` (vm eval of opencv.js in
+global scope, plus a global `require` because Emscripten's runtime calls `require('fs')` when it
+sees `process`) and a `fetch` for `file:` URLs (sba-solver-wasm), then `import()`s the worker
+(package.json `"type": "module"` makes it an ES module — the workers are strict-mode clean).
+Orchestration that used to live in UI files was moved, not copied: `calib/refine.js` (SBA
+rounds / model selection, was `ui/stage-extrinsics.js` runSba), `calibrationTomlFromResults`
+(toml.js, was `buildToml`), `distortionFlags` / `intrinsicsSamples` (intrinsics.js),
+`reevaluatePerFrame` (refine.js). The app's SBA numbers are bit-identical before and after.
+
+**Frame numbering** = the app's: N-th sample of the MP4 sample table in presentation order
+(`probeVideo` reads it with sample-table.js + mp4box, like `loading/video.js`), and ffmpeg runs
+with `-ignore_editlist 1 -noautorotate -fps_mode passthrough` so it emits one picture per sample
+in pts order; the emitted count is checked against the table (a mismatch would shift every
+frame number → error). Guarded by `tests/cli/test-ffmpeg-frames.mjs` (barcode videos with
+B-frames, fragmented H.264/HEVC) and `tests/e2e/cli-parity.mjs` (same barcodes through WebCodecs).
+
+**Pixels.** The detect worker gets `-pix_fmt gray`: the Y plane expanded from video range to
+full range. The browser path (VideoFrame → canvas RGBA → `cvtColor(RGBA2GRAY)`) gives the same
+image to 0.006 grey levels on average (max 1) on the sample and synthetic sessions — Chromium's
+YUV→RGB→gray round trip is effectively the expanded luma. Corner positions then differ by
+0.002 px median (p99 < 0.5 px; a handful of corners differ by 1–2 px where subpixel refinement
+flips), and the calibrations agree to < 0.1 mm in camera position and 0.001 px in median
+reprojection error (`cli-parity.mjs`: sample 0.112 / 0.112 px, 4-cam × 400-frame synthetic
+0.124 / 0.124 px). HEVC copies (x265 Main, B-frames, fragmented like campy) calibrate to
+within 0.5 mm of the H.264 originals and ~2 mm of ground truth, as the app does.
+
+**Differences from the app, by design:** the CLI keeps up to `ceil(threads / views) + 1` frames
+in flight per view (the app: 2) so every thread is busy — results do not depend on it; the
+`auto` board pattern (even-row boards without a board.toml `legacy_pattern`) is probed on 5
+frames spread over each video instead of the frame on screen; no thumbnails. Thread counts come
+from `SLURM_CPUS_PER_TASK`, else `os.availableParallelism()` (respects CPU affinity). Each
+OpenCV thread costs ~150 MB (2.5 GB peak with 15 threads).
 
 ### Index spaces
 
@@ -228,14 +269,17 @@ case-insensitively (`board_X` works).
 
 ```bash
 python3 server.py 8080          # static + HTTP Range (python -m http.server also works)
-node tests/run-mjs-tests.mjs    # unit tests (pure modules; Node ≥ 18)
+node tests/run-mjs-tests.mjs    # unit tests (pure modules; Node ≥ 18) + tests/cli/ (Node ≥ 20, ffmpeg)
+node cli/calibrate.mjs sample_session --out /tmp/calibration.toml   # command line (ffmpeg, Node ≥ 20)
 # browser: http://localhost:8080/tests/test-runner.html  (same test files, tests/harness.mjs reports to the page)
 # e2e (Playwright, headless Chromium): tests/e2e/README.md
 node tests/e2e/smoke-pipeline.mjs
 SESSION=/tmp/synthetic_session node tests/e2e/stress-synthetic.mjs   # after scripts/make_synthetic_session.py
+node tests/e2e/cli-parity.mjs   # CLI vs app on SESSION (default sample_session); starts its own server
 ```
 
-`package.json` (`"type": "module"`) exists only so Node runs the `.js` ESM sources.
+`package.json` (`"type": "module"`) exists only so Node runs the `.js` ESM sources (and so the
+CLI can `import()` the classic worker scripts as modules).
 Test files must stay environment-agnostic (no `node:` imports outside
 `tests/harness.mjs`'s `isNode` branches) so the browser runner can load them.
 
@@ -278,3 +322,8 @@ PR under `pr/<n>/` and posts a sticky comment. Repo settings required: Pages sou
   the red-X overlay match; a pose solved under the old K drawn with the new K looks several px
   off. Revert restores the original per-frame arrays.
 - Saved sessions don't include thumbnails; galleries then show frame numbers only.
+- CLI: a `.js` file cannot be `require()`d (package.json `"type": "module"`), so classic scripts
+  (opencv.js, mp4box.js) are evaluated with `vm.runInThisContext` / indirect eval. Emscripten
+  in a worker_thread needs `self.location.href` and a global `require`; both are set in
+  `cli/worker-host.mjs`. Keep new code in `loading/*-worker.js` free of sloppy-mode-only
+  constructs (they run as ES modules under the CLI).
