@@ -1,0 +1,12 @@
+{
+  "name": "calibrat3",
+  "private": true,
+  "license": "BSD-3-Clause",
+  "type": "module",
+  "description": "Browser-based multi-camera ChArUco calibration (no build step). package.json exists only so Node treats the ESM sources as modules (tests, cli/calibrate.mjs); there is nothing to install.",
+  "scripts": {
+    "test": "node tests/run-mjs-tests.mjs",
+    "calibrate": "node cli/calibrate.mjs",
+    "serve": "python3 server.py"
+  }
+}
