@@ -51,6 +51,35 @@ export function generateCalibrationToml(cameras, meta = {}) {
     return lines.join('\n');
 }
 
+/**
+ * The app's calibration.toml (Export stage) from pipeline results: every view with both
+ * intrinsics and extrinsics, in view order, plus a [metadata] table. Shared by
+ * ui/stage-export.js and cli/calibrate.mjs so both write the same file.
+ * @param {{viewNames:string[], intrinsics:object[], extrinsics:object[], referenceView:number, board:object,
+ *          sessionName?:string, sampledFrames:number, refinedBySba:boolean, reproj?:object, generated?:Date,
+ *          extraMetadata?:object}} r
+ * @returns {string|null} null when no camera is complete
+ */
+export function calibrationTomlFromResults(r) {
+    const cams = [];
+    r.viewNames.forEach((name, i) => {
+        const intr = r.intrinsics[i], extr = r.extrinsics[i];
+        if (!intr || !extr || extr.error) return;
+        cams.push({ name, size: [intr.imageSize.width, intr.imageSize.height], K: intr.K, dist: intr.dist, rvec: extr.rvec, tvec: extr.tvec });
+    });
+    if (cams.length === 0) return null;
+    return generateCalibrationToml(cams, {
+        referenceName: r.viewNames[r.referenceView],
+        generated: r.generated,
+        metadata: {
+            generator: 'calibrat3', session: r.sessionName, board: `${r.board.boardX}x${r.board.boardY} ${r.board.dictName}`,
+            sampled_frames: r.sampledFrames, refined_by_sba: !!r.refinedBySba,
+            ...(r.reproj ? { mean_reprojection_error_px: Number(r.reproj.summary.overall.mean.toFixed(4)) } : {}),
+            ...(r.extraMetadata || {}),
+        },
+    });
+}
+
 /** board.toml writer (sleap-anipose keys). */
 export function generateBoardToml(board) {
     const d = tomlFromDictName(board.dictName) || { markerBits: 4, dictSize: 1000 };

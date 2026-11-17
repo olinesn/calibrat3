@@ -5,7 +5,7 @@
  */
 
 import { state } from './app-state.js';
-import { generateCalibrationToml, generateBoardToml } from '../import-export/toml.js';
+import { calibrationTomlFromResults, generateBoardToml } from '../import-export/toml.js';
 import { generateCalibrationJson } from '../import-export/sba-json.js';
 import { serializeSession, downloadText } from '../import-export/session-save.js';
 import { log } from './log-panel.js';
@@ -44,20 +44,10 @@ export function setupExportStage() {
 }
 
 export function buildToml() {
-    const cams = [];
-    state.views.forEach((v, i) => {
-        const intr = state.intrinsics[i], extr = state.extrinsics[i];
-        if (!intr || !extr || extr.error) return;
-        cams.push({ name: v.name, size: [intr.imageSize.width, intr.imageSize.height], K: intr.K, dist: intr.dist, rvec: extr.rvec, tvec: extr.tvec });
-    });
-    if (cams.length === 0) return null;
-    return generateCalibrationToml(cams, {
-        referenceName: state.views[state.referenceView]?.name,
-        metadata: {
-            generator: 'calibrat3', session: state.sessionName, board: `${state.board.boardX}x${state.board.boardY} ${state.board.dictName}`,
-            sampled_frames: state.sampledFrames.length, refined_by_sba: !!state.sbaResult,
-            ...(state.reproj ? { mean_reprojection_error_px: Number(state.reproj.summary.overall.mean.toFixed(4)) } : {}),
-        },
+    return calibrationTomlFromResults({
+        viewNames: state.views.map(v => v.name), intrinsics: state.intrinsics, extrinsics: state.extrinsics,
+        referenceView: state.referenceView, board: state.board, sessionName: state.sessionName,
+        sampledFrames: state.sampledFrames.length, refinedBySba: !!state.sbaResult, reproj: state.reproj,
     });
 }
 

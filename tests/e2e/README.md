@@ -42,3 +42,13 @@ Environment: `BASE=http://host:port` (default `http://localhost:8080`),
   every frame, runs intrinsics/extrinsics/SBA, compares against the generator's
   ground-truth `calibration.toml`, and reports wall-clock timings. Requires
   `SESSION=/path/to/synthetic_session`.
+- **`cli-parity.mjs`** — the command line (`cli/calibrate.mjs`, ffmpeg + Node) against the app
+  on the same session. (1) Frame numbering: H.264 B-frame videos whose frames show their own
+  number (regular and fragmented MP4) decoded by the app's `OnDemandVideoDecoder` and by
+  ffmpeg — frame N must show N in both. (2) Pixels: the gray image the app's detect worker
+  computes (VideoFrame → canvas → OpenCV RGB2GRAY weights) vs ffmpeg's gray plane on frames of
+  the session. (3) Runs `real-session.mjs` (`OUT_TOML`, `OUT_SESSION`) and the CLI, then
+  compares per-camera detection counts and corner positions, intrinsics, camera positions, and
+  the cross-view reprojection error of both calibrations on both detection sets (scored with
+  `calib/triangulation.js`). `SESSION` (default `sample_session`), `TARGET` (100), `OUT`
+  (output folder), `BASE` (default: starts `python3 server.py` on a free port). Needs ffmpeg.

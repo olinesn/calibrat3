@@ -10,6 +10,8 @@
  *   <- {type:'configured', key}
  *   -> {type:'detect', requestId, frame, view, image: VideoFrame|ImageBitmap, width, height,
  *          wantThumb?:boolean, thumbWidth?:number}
+ *      or {type:'detect', requestId, frame, view, gray: Uint8Array(width*height), width, height}
+ *          an 8-bit luma image (the command line's ffmpeg frames; no canvas, no thumbnail)
  *   <- {type:'result', requestId, frame, view, ids:Int32Array, corners:Float32Array,
  *          numMarkers, ms, timings:{convert,markers,charuco}, thumb: Blob|null}
  *   <- {type:'error', requestId?, error}
@@ -135,6 +137,7 @@ function detect(msg) {
     if (!det) throw new Error('detector not configured');
     const t0 = performance.now();
     const { requestId, frame, view, image, width, height } = msg;
+    if (msg.gray) return detectGray(msg, t0);
     const w = width || image.displayWidth || image.width;
     const h = height || image.displayHeight || image.height;
     ensureCanvas(w, h);
@@ -160,7 +163,20 @@ function detect(msg) {
     CV.cvtColor(src, gray, CV.COLOR_RGBA2GRAY);
     src.delete();
     const t1 = performance.now();
+    detectOnGray(gray, w, h, { requestId, frame, view, t0, t1, thumbPromise, thumb });
+}
 
+/** Command-line path: the frame is already an 8-bit gray image (ffmpeg -pix_fmt gray). */
+function detectGray(msg, t0) {
+    const { requestId, frame, view, width: w, height: h } = msg;
+    if (msg.gray.length !== w * h) throw new Error(`gray image has ${msg.gray.length} bytes, expected ${w}x${h}`);
+    const gray = new CV.Mat(h, w, CV.CV_8UC1);
+    gray.data.set(msg.gray);
+    detectOnGray(gray, w, h, { requestId, frame, view, t0, t1: performance.now(), thumbPromise: null, thumb: null });
+}
+
+/** Markers + ChArUco corners on a gray Mat (deleted here), then post the result. */
+function detectOnGray(gray, w, h, { requestId, frame, view, t0, t1, thumbPromise, thumb }) {
     let markerCorners = new CV.MatVector();
     let markerIds = new CV.Mat();
     const rejected = new CV.MatVector();
