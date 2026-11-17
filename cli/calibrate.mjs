@@ -56,9 +56,11 @@ Sampling and detection (stage 2):
   --target N                  frames to sample, evenly strided over the video (default 100)
   --all-frames                detect on every frame
   --fast-markers              search markers at half resolution on frames >= 1400 px (off)
-  --board-x N --board-y N     board squares (default: board.toml, else 8 x 11)
-  --square L --marker L       square / marker side, any unit (default: board.toml, else 24 / 18.75)
+  --board-x N --board-y N     board squares across / down
+  --square L --marker L       square / marker side, any unit (the calibration comes out in it)
   --dict NAME                 ArUco dictionary, e.g. DICT_4X4_1000
+                              The board comes from the session's board.toml; these flags override
+                              its values. Without a board.toml all five are required.
   --board-pattern P           auto | new | legacy (OpenCV < 4.6 layout). Default: board.toml's
                               legacy_pattern when there is a board.toml, else auto (probe both)
 
@@ -249,8 +251,13 @@ async function main(argv) {
     let board;
     {
         const fromToml = session.board || null;
-        if (!fromToml) log(`No board.toml in ${root}; using ${a['board-x'] || a['board-y'] || a.square || a.marker || a.dict ? 'the command-line board' : `the default board ${DEFAULT_BOARD.boardX}x${DEFAULT_BOARD.boardY} ${DEFAULT_BOARD.dictName}, square ${DEFAULT_BOARD.squareLength}, marker ${DEFAULT_BOARD.markerLength}`}`, 'warn');
-        else log(`Board from ${session.boardPath}`);
+        if (!fromToml) {
+            // No silent default board: a lab uses several boards, and a wrong one detects nothing.
+            const missing = ['board-x', 'board-y', 'square', 'marker', 'dict'].filter(k => a[k] === undefined);
+            if (missing.length) throw new UsageError(`no board.toml in ${root}: put one next to the videos (as the app's Export writes it), ` +
+                `or describe the board with ${missing.map(k => `--${k}`).join(', ')}`);
+            log('No board.toml; board from the command line');
+        } else log(`Board from ${session.boardPath}`);
         const b = { ...DEFAULT_BOARD, ...(fromToml || {}) };
         if (a['board-x']) b.boardX = intArg(a['board-x'], 'board-x', 8, 3);
         if (a['board-y']) b.boardY = intArg(a['board-y'], 'board-y', 11, 3);
