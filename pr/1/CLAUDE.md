@@ -109,7 +109,9 @@ within 0.5 mm of the H.264 originals and ~2 mm of ground truth, as the app does.
 **Differences from the app, by design:** the CLI keeps up to `ceil(threads / views) + 1` frames
 in flight per view (the app: 2) so every thread is busy — results do not depend on it; the
 `auto` board pattern (even-row boards without a board.toml `legacy_pattern`) is probed on 5
-frames spread over each video instead of the frame on screen; no thumbnails. Thread counts come
+frames spread over each video instead of the frame on screen; no default board (the app's form
+starts on 8 x 11 DICT_4X4_1000): without a board.toml the CLI stops unless all five board flags
+are given, because the lab uses several boards and a wrong one silently detects nothing; no thumbnails. Thread counts come
 from `SLURM_CPUS_PER_TASK`, else `os.availableParallelism()` (respects CPU affinity). Each
 OpenCV thread costs ~150 MB (2.5 GB peak with 15 threads).
 

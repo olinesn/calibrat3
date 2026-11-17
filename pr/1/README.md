@@ -100,6 +100,10 @@ node cli/calibrate.mjs <session-folder> --out calibration.toml --all-frames \
 node cli/calibrate.mjs --help          # every option (board, intrinsics, SBA, threads)
 ```
 
+The board comes from the session's `board.toml` (the file the app reads and its Export
+writes); `--board-x`, `--board-y`, `--square`, `--marker` and `--dict` override its values.
+Without a `board.toml` all five are required: the CLI never guesses a board.
+
 Needs Node ≥ 20 and `ffmpeg` / `ffprobe` on the `PATH` (or `--ffmpeg /path/to/ffmpeg`);
 nothing to install (`npm install` is not needed). Frame numbers are 0-based and are the
 app's: frame N is the N-th picture in presentation order, B-frames included
