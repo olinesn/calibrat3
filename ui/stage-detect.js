@@ -12,7 +12,7 @@ import { state, controllers, resetDownstreamOfDetection, viewNames, cameraColor 
 import { DetectionStore } from '../calib/detection-store.js';
 import { normalizeBoard, numCorners, numMarkers, legacyPatternDiffers } from '../calib/board.js';
 import { CALIBIO_PRESETS, presetById, presetBoard, presetForBoard } from '../calib/board-presets.js';
-import { identifyCalibioBoard } from '../calib/board-identify.js';
+import { identifyCalibioBoard, AUTO_SEARCH, sizeAmbiguityText } from '../calib/board-identify.js';
 import { stridedFrames } from '../calib/frame-selection.js';
 import { log, fmtMs } from './log-panel.js';
 import { $, el, intInput, numInput, setStageStatus, expandStage, setEnabled, showError, Progress, errorColor } from './stages.js';
@@ -25,10 +25,11 @@ const MAX_INFLIGHT_PER_VIEW = 2;   // frames handed to the pool but not yet retu
 const THUMB_WIDTH = 160;
 const BOARD_FIELDS = ['boardX', 'boardY', 'squareLength', 'markerLength', 'arucoDict', 'boardPattern'];
 // Auto (calib.io): dictionaries searched, in order (stop at the first with AUTO_ENOUGH markers), and
-// how many frames (current first, then spread over the sampled ones) it may look at.
-const AUTO_DICTS = ['DICT_5X5_1000', 'DICT_4X4_1000', 'DICT_6X6_1000'];
-const AUTO_ENOUGH = 4;
-const AUTO_MAX_FRAMES = 12;
+// how many frames (current first, then spread over the sampled ones) it may look at. Shared with
+// the command line (calib/board-identify.js AUTO_SEARCH).
+const AUTO_DICTS = AUTO_SEARCH.dicts;
+const AUTO_ENOUGH = AUTO_SEARCH.enough;
+const AUTO_MAX_FRAMES = AUTO_SEARCH.maxFrames;
 
 let urlPreset = null;          // ?board= in the page URL: wins over a board.toml
 let autoObservations = null;   // Auto's marker detections so far (cleared when a session opens)
@@ -258,8 +259,7 @@ async function resolvePreset() {
     }
     if (r.status === 'size-ambiguous') {
         log(`Auto (calib.io): ${r.reason}`, 'warn');
-        throw new Error(`Auto (calib.io): the board is a ${r.grid.rows} × ${r.grid.cols} calib.io grid, sold as ${r.candidates.map(p => `${p.plate[0]} × ${p.plate[1]} mm (${p.squareLength} mm squares)`).join(' or ')}; ` +
-            'the video can\'t tell these sizes apart. Pick yours under Board preset, or type its square size in Square and detect again.');
+        throw new Error(`Auto (calib.io): ${sizeAmbiguityText(r)} Pick yours under Board preset, or type its square size in Square and detect again.`);
     }
     applyPresetChoice('custom');
     log(`Auto (calib.io): no calib.io board identified — ${r.reason}. Board preset is back on Custom.`, 'warn');
