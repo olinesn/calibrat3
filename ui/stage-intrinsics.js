@@ -11,6 +11,8 @@ import { FrameStrip, errorColormap } from './frame-strip.js';
 import { SwarmPlot } from './plots.js';
 import { FrameGallery } from './gallery.js';
 import { emit, on } from './events.js';
+import { distortionFlags, intrinsicsSamples } from '../calib/intrinsics.js';
+import { reevaluatePerFrame } from '../calib/refine.js';
 
 let strip = null, plot = null, gallery = null, galleryBest = null, progress = null;
 let worstOrder = [];   // frames sorted by max error desc (for { } navigation)
@@ -75,15 +77,8 @@ function indexOf(frames, f) {
     return -1;
 }
 
-/** Map the distortion-model selector to calibrateCamera flags. */
-export function distortionFlags(model) {
-    switch (model) {
-        case 'k1': return { fixK2: true, fixK3: true, zeroTangent: true };
-        case 'k1k2': return { fixK3: true, zeroTangent: true };
-        case 'k1k2k3': return { zeroTangent: true };
-        default: return {};
-    }
-}
+/** Map the distortion-model selector to calibrateCamera flags (calib/intrinsics.js, shared with the CLI). */
+export { distortionFlags };
 
 // ---- compute -------------------------------------------------------------------
 
@@ -110,11 +105,7 @@ export async function computeIntrinsics() {
         const report = () => progress.set(fractions.reduce((a, b) => a + b, 0) / nViews,
             state.views.map((v, i) => `${v.name} ${Math.round(fractions[i] * 100)}%`).join(' · '));
         await Promise.all(state.views.map(async (view, v) => {
-            const samples = [];
-            for (const f of store.frames()) {
-                const d = store.get(f, v);
-                if (d && d.ids.length >= 4) samples.push({ frame: f, ids: d.ids, corners: d.corners });
-            }
+            const samples = intrinsicsSamples(store, v);
             const imageSize = { width: view.info.width, height: view.info.height };
             msgs[v] = `${samples.length} frames`;
             report();
@@ -174,28 +165,9 @@ export async function computeIntrinsics() {
  * `used` / `counts` / `selectedFrames` (which frames the original fit used) are kept.
  */
 export async function reevaluateIntrinsics(intrinsics, onProgress) {
-    const store = state.detections;
-    const cw = controllers.calib;
-    if (!store) return intrinsics;
-    const out = intrinsics.slice();
-    const fractions = new Array(intrinsics.length).fill(1);
-    const report = () => onProgress && onProgress(fractions.reduce((a, b) => a + b, 0) / intrinsics.length);
-    await Promise.all(intrinsics.map(async (r, v) => {
-        if (!r || !r.perFrame) return;
-        const frames = Array.from(r.perFrame.frames);
-        const samples = frames.map(f => { const d = store.get(f, v); return { frame: f, ids: d.ids, corners: d.corners }; });
-        fractions[v] = 0; report();
-        const res = await cw.request('reprojectFrames', { K: r.K, dist: r.dist, samples, board: state.board }, { onProgress: (f) => { fractions[v] = f; report(); } });
-        fractions[v] = 1; report();
-        const errors = res.errors instanceof Float32Array ? res.errors : Float32Array.from(res.errors);
-        const rvecs = res.rvecs instanceof Float64Array ? res.rvecs : Float64Array.from(res.rvecs);
-        const tvecs = res.tvecs instanceof Float64Array ? res.tvecs : Float64Array.from(res.tvecs);
-        // RMS over the frames the original fit used, for the summary table
-        let ss = 0, n = 0;
-        for (let i = 0; i < errors.length; i++) if (r.perFrame.used[i] && Number.isFinite(errors[i])) { ss += errors[i] * errors[i]; n++; }
-        out[v] = { ...r, perFrame: { ...r.perFrame, errors, rvecs, tvecs }, rmsError: n ? Math.sqrt(ss / n) : r.rmsError, perFrameRefreshed: true };
-    }));
-    return out;
+    if (!state.detections) return intrinsics;
+    return reevaluatePerFrame(intrinsics, state.detections, state.board,
+        (payload, opts) => controllers.calib.request('reprojectFrames', payload, opts), onProgress);
 }
 
 function medianOf(arr) {

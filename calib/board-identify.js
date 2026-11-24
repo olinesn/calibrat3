@@ -36,6 +36,26 @@ export const IDENTIFY_DEFAULTS = Object.freeze({
     maxOutOfRange: 0.1,     // share of marker ids past a grid's last one that rules the grid out
 });
 
+/**
+ * How Auto searches a video (the app's Detect stage and the command line): the dictionaries
+ * tried on each image, in order, stopping at the first with `enough` markers, and how many
+ * frames it may look at before giving up.
+ */
+export const AUTO_SEARCH = Object.freeze({
+    dicts: Object.freeze(['DICT_5X5_1000', 'DICT_4X4_1000', 'DICT_6X6_1000']),
+    enough: 4,
+    maxFrames: 12,
+});
+
+/**
+ * The "which size?" sentence for a 'size-ambiguous' result: the grid, the sizes calib.io sells
+ * it in, and that the video can't tell them apart. Callers add how to pick one.
+ */
+export function sizeAmbiguityText(r) {
+    return `the board is a ${r.grid.rows} × ${r.grid.cols} calib.io grid, sold as ${r.candidates.map(p => `${p.plate[0]} × ${p.plate[1]} mm (${p.squareLength} mm squares)`).join(' or ')}; ` +
+        'the video can\'t tell these sizes apart.';
+}
+
 /** 'DICT_5X5_1000' -> 'DICT_5X5'. */
 export function dictFamily(dictName) {
     const m = /^(DICT_\d+X\d+)/.exec(dictName || '');

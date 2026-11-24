@@ -122,9 +122,5 @@ function fmtTime(t) {
     return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
 }
 
-/** Format milliseconds for log lines. */
-export function fmtMs(ms) {
-    if (ms < 1000) return `${ms.toFixed(0)} ms`;
-    if (ms < 60000) return `${(ms / 1000).toFixed(1)} s`;
-    return `${Math.floor(ms / 60000)}m ${((ms % 60000) / 1000).toFixed(0)}s`;
-}
+/** Format milliseconds for log lines (pure; shared with the command line). */
+export { fmtMs } from '../calib/refine.js';
