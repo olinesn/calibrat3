@@ -26,7 +26,8 @@ Read the documentation at https://talmolab.github.io/luc3d-docs/#camera-calibrat
 
   A `board.toml` next to the videos fills in the board form. A calib.io ChArUco board can be
   picked from *Board preset*, or found from its markers with *Auto* (`?board=auto`,
-  `?board=CCT300200C`, or `preset = "…"` in board.toml for headless runs).
+  `?board=CCT300200C`, or `preset = "…"` in board.toml for headless runs; the command line
+  takes `--board CCT300200C` or `--board auto --square 20`).
 - **Batch ChArUco detection that scales.** One sequential decode pass per view feeds
   a pool of OpenCV.js web workers (detectors built once per board config). Frames
   are never drawn to the display during the run, back-pressure keeps memory flat,
@@ -87,6 +88,105 @@ python3 server.py            # http://localhost:8080/  (adds HTTP Range support)
    *Refine (bundle adjustment)*. Exclude frames from the cross-view set if needed.
 5. **Export** — download `calibration.toml` / JSON, or save the session.
 
+### Command line (no browser)
+
+`cli/calibrate.mjs` runs the same pipeline in plain Node, with **ffmpeg** decoding the
+videos — for clusters, scripts, and codecs your browser cannot decode (headless
+Chromium on Linux has no HEVC). It takes the same session folder and writes the same
+`calibration.toml` as the app's Export, using the app's own code (detect/calib workers in
+`worker_threads`, same OpenCV.js build, same defaults as the app's buttons).
+
+```bash
+node cli/calibrate.mjs <session-folder> --out calibration.toml [--target 600]
+node cli/calibrate.mjs <session-folder> --out calibration.toml --all-frames \
+    --session-out session.calibrat3.json --report report.json
+node cli/calibrate.mjs <session-folder> --out calibration.toml --report report.json --board CCT300200C
+node cli/calibrate.mjs <session-folder> --out calibration.toml --report report.json --board auto --square 20
+node cli/calibrate.mjs --list-boards   # the calib.io presets: ids, SKUs, sizes
+node cli/calibrate.mjs --help          # every option (board, intrinsics, SBA, threads)
+```
+
+**Board.** Without `--board`, the board comes from the session's `board.toml` (the file the
+app reads and its Export writes), read as the app reads it: `preset = "<id or SKU>"` fills the
+values the file leaves out (the file's own values win), `preset = "auto"` identifies the board
+(its `square_length` is the size hint). `--board-x`, `--board-y`, `--square`, `--marker` and
+`--dict` override the file's values. Without a `board.toml` and without `--board`, all five are
+required: the CLI never guesses a board.
+
+- `--board <preset id | SKU>` (e.g. `calibio-300x200-coarse` or `CCT300200C`) uses that calib.io
+  board as sold. It replaces `board.toml`, which is then not read for the board (the log and
+  the report say so). `--square` is ignored with a note; the other board flags are refused.
+- `--board auto` identifies the calib.io board as the app's *Auto* does: ArUco markers only, in
+  every view, on up to 12 frames spread over the sampled ones, until
+  `calib/board-identify.js` decides. Most calib.io grids are sold in two or three sizes that
+  look the same in a video, so give the square size in mm with `--square` (with board.toml's
+  `preset = "auto"`, `--square` replaces `square_length`).
+- When Auto can't settle the board, the run stops with exit status 3 and the app's message,
+  naming the sizes, e.g. `Auto (calib.io): the board is a 9 × 14 calib.io grid, sold as
+  600 × 400 mm (40 mm squares) or 300 × 200 mm (20 mm squares); the video can't tell these
+  sizes apart. Pick yours with --board calibio-600x400-coarse or --board
+  calibio-300x200-coarse, or give its square size with --square.` A board that is not a
+  calib.io one (another dictionary, or markers that don't line up as any calib.io grid) also
+  stops with status 3: describe it in `board.toml` or with the five board flags instead.
+
+Exit status: 0 calibrated, 1 failed, 2 bad arguments, 3 board not settled (Auto).
+
+**report.json** (`--report`), written also when the run fails once the arguments are
+accepted. The first keys answer "did it work, with which board, which cameras":
+
+| Field | Meaning |
+| --- | --- |
+| `ok`, `exitCode`, `error` | `true` / 0 / `null` when calibration.toml was written; otherwise the exit status and the message |
+| `board.preset`, `board.sku`, `board.label` | the calib.io preset the board used is, value for value (`null` for any other board) |
+| `board.source` | where the board came from: `"flag"` (`--board`), `"board.toml"`, or `"board-flags"` (the five board flags, no board.toml) |
+| `board.requested` | what was asked for: a preset id, `"auto"`, or `"custom"` (values) |
+| `board.method` | `"preset"` (a named preset, as sold), `"auto"` (Auto picked the preset), `"custom"` (values; `board.preset` still names a preset they equal) |
+| `board.boardToml`, `board.boardTomlUsed` | the board.toml found in the session (path relative to it, or `null`) and whether it set the board |
+| `board.overrides`, `board.notes` | board flags that replaced board.toml values; notes such as "board.toml not used", "--square ignored" |
+| `board.boardX`, `boardY`, `squareLength`, `markerLength`, `dictName`, `legacyPattern` | the board detected (absent when Auto failed) |
+| `board.auto` | `null` unless Auto ran: `status` (`match`, `size-ambiguous`, `undecided`, `no-match`), `reason` (the evidence in words), `picked` (preset id or `null`), `candidates` (preset ids still possible), `grid` (`{rows, cols}`), `dictName`, `squareHint` (mm or `null`) and `squareHintFrom` (`"flag"`, `"board.toml"`, `null`), `markersSeen`, `maxId`, `framesSearched` (frame numbers), `framesWithMarkers`, `images`, `scores` (per calib.io grid: `rows`, `cols`, `markers`, `agree`, `pairs`, `fraction`, `outOfRange`, `ruledOut`), `ms` |
+| `cameras[]` | one row per video: `name`; `inCalibration` (the camera is in calibration.toml) and `reason` when not; `framesSampled`, `framesWithBoard` (sampled frames where the board was detected), `framesUsable` (with at least `--min-corners` corners); `reprojectionPx` — the final cross-view reprojection error over all its observations, `{median, p95, mean, max, observations}` in px (after bundle adjustment when it improved), or `null`; `intrinsicsRmsPx` |
+| `options`, `timings`, `detection`, `intrinsics`, `initial`, `sba`, `final`, `session`, `referenceView` | the run's settings, stage times (ms), detection counts, per-camera intrinsics, reprojection summaries and camera poses before and after bundle adjustment, the videos |
+
+Needs Node ≥ 20 and `ffmpeg` / `ffprobe` on the `PATH` (or `--ffmpeg /path/to/ffmpeg`);
+nothing to install (`npm install` is not needed). Frame numbers are 0-based and are the
+app's: frame N is the N-th picture in presentation order, B-frames included
+(`tests/cli/test-ffmpeg-frames.mjs`). `--session-out` writes a session file the app can
+open (open the same folder, then *Load session*) to inspect detections, errors and
+overlays; `--report` writes the JSON above. Progress goes to stderr, one line every 10 s
+during detection.
+
+Parity with the app (`tests/e2e/cli-parity.mjs`, same session, same sampled frames):
+the gray image ffmpeg gives differs from the one the app's detect worker gets from the
+browser by 0.006 grey levels on average; corner positions differ by 0.002 px (median);
+camera positions by < 0.1 mm; the cross-view reprojection error is the same to 3
+decimals (sample session 0.112 px, 4-camera synthetic session 0.124 px).
+
+#### On a Slurm cluster (Princeton Spock)
+
+CPU only; ffmpeg decodes HEVC in software. One-time setup in your home directory:
+
+```bash
+# Node (any >= 20; a prebuilt tarball, no root needed)
+mkdir -p ~/opt && cd ~/opt
+curl -LO https://nodejs.org/dist/v22.11.0/node-v22.11.0-linux-x64.tar.xz
+tar xf node-v22.11.0-linux-x64.tar.xz
+echo 'export PATH=$HOME/opt/node-v22.11.0-linux-x64/bin:$PATH' >> ~/.bashrc
+git clone https://github.com/talmolab/calibrat3.git ~/calibrat3
+```
+
+Then submit a job (`cli/spock-calibrate.sbatch` is a template):
+
+```bash
+sbatch -p all --cpus-per-task 16 --mem 12G --time 2:00:00 \
+    ~/calibrat3/cli/spock-calibrate.sbatch /path/to/session /path/to/calibration.toml --target 600
+```
+
+The job runs `module load ffmpeg/6.1` and uses the CPUs Slurm gave it
+(`SLURM_CPUS_PER_TASK`): one detection thread per CPU (minus one), each with its own
+OpenCV runtime (~150 MB). Memory: about 4 GB plus 0.25 GB per CPU. Do not run large
+sessions on the login node.
+
 ### Keyboard
 
 | Key | Action |
@@ -110,9 +210,10 @@ ui/             app state, log panel, stages, video panel, overlays, frame strip
 loading/        video decoder + batch iterator, detect worker + pool, calib worker + client,
                 folder loader
 import-export/  toml, calibration JSON, session save/load
+cli/            command line: calibrate.mjs, ffmpeg frame reader, Web Worker API over worker_threads
 lib/            vendored deps with PROVENANCE.txt: opencv (4.13.0), sba-solver-wasm (0.2.0), mp4box (0.5.2)
 sample_session/ sleap-anipose minimal_session (4 short videos + board.toml)
-tests/          Node ESM unit tests (node tests/run-mjs-tests.mjs)
+tests/          Node ESM unit tests (node tests/run-mjs-tests.mjs; tests/cli/ = command line, needs ffmpeg)
 .github/workflows/  Pages deploy from main + PR previews
 ```
 
@@ -132,6 +233,7 @@ python3 server.py 8080 &
 node tests/e2e/smoke-pipeline.mjs                                   # sample session, full pipeline
 SESSION=/tmp/synthetic_session node tests/e2e/stress-synthetic.mjs  # 4 cams × 1200 frames vs ground truth
 SESSION=/path/to/real/session TARGET=600 node tests/e2e/real-session.mjs  # playback smoothness + pipeline report (+ anipose reference comparison)
+SESSION=/path/to/session TARGET=100 node tests/e2e/cli-parity.mjs        # command line vs app on the same session (starts its own server)
 ```
 
 The stress session is generated by `scripts/make_synthetic_session.py` (numpy,

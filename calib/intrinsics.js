@@ -172,3 +172,23 @@ export function computeIntrinsicsForCamera(cv, allSamples, imageSize, board, opt
         timings: { calibrateMs: calMs, reprojectMs: reMs, totalMs: performance.now() - t0 },
     };
 }
+
+/** Map the `Distortion model` choice (k1 | k1k2 | k1k2k3 | full) to calibrateCamera flags. */
+export function distortionFlags(model) {
+    switch (model) {
+        case 'k1': return { fixK2: true, fixK3: true, zeroTangent: true };
+        case 'k1k2': return { fixK3: true, zeroTangent: true };
+        case 'k1k2k3': return { zeroTangent: true };
+        default: return {};
+    }
+}
+
+/** One view's detections as intrinsics samples: every stored frame with >= 4 corners, frame order. */
+export function intrinsicsSamples(store, view) {
+    const samples = [];
+    for (const f of store.frames()) {
+        const d = store.get(f, view);
+        if (d && d.ids.length >= 4) samples.push({ frame: f, ids: d.ids, corners: d.corners });
+    }
+    return samples;
+}
