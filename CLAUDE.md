@@ -111,7 +111,10 @@ in flight per view (the app: 2) so every thread is busy — results do not depen
 `auto` board pattern (even-row boards without a board.toml `legacy_pattern`) is probed on 5
 frames spread over each video instead of the frame on screen; no default board (the app's form
 starts on 8 x 11 DICT_4X4_1000): without a board.toml the CLI stops unless all five board flags
-are given, because the lab uses several boards and a wrong one silently detects nothing; no thumbnails. Thread counts come
+are given (or `--board`), because the lab uses several boards and a wrong one silently detects nothing; no thumbnails;
+Auto (`--board auto` or board.toml `preset = "auto"`) looks at frames spread over the sampled ones
+(the app starts with the frame on screen), decoded by fast seek, and stops the run (exit 3) where
+the app would ask the user — no automatic fallback to board.toml's other values. Thread counts come
 from `SLURM_CPUS_PER_TASK`, else `os.availableParallelism()` (respects CPU affinity). Each
 OpenCV thread costs ~150 MB (2.5 GB peak with 15 threads).
 
@@ -259,7 +262,11 @@ patch without a board edge (a shear). The physical size is not observable from i
 without intrinsics: most grids are sold in 2-3 sizes, so Auto needs the Square field (or
 board.toml `square_length`, or `?square=`) to hold one of the candidates' square sizes, and
 otherwise stops with an error naming them. Headless: `?board=<id|SKU|auto>` (wins over
-board.toml) or board.toml `preset = "…"` (its explicit values win over the preset's).
+board.toml) or board.toml `preset = "…"` (its explicit values win over the preset's); the command
+line's `--board <id|SKU|auto>` (wins over board.toml) and `--square` (Auto's size hint) do the same,
+and its `--report` says which board was used and how. Auto's dictionaries / frame budget
+(`AUTO_SEARCH`) and its size message (`sizeAmbiguityText`) live in `calib/board-identify.js` so the
+two stay the same.
 
 ## Dependencies (all vendored under `lib/`, each with `PROVENANCE.txt`)
 

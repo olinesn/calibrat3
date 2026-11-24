@@ -4,6 +4,7 @@
  * ffmpeg decoding the videos (so HEVC works on machines whose browser cannot decode it).
  *
  *   node cli/calibrate.mjs <session-folder> --out calibration.toml [--target 600] [...]
+ *   node cli/calibrate.mjs <session-folder> --out calibration.toml --report report.json --board auto --square 20
  *
  * Same session folder the app opens (one video per camera + board.toml; flat or
  * anipose-style nested layout — loading/folder-loader.js), same stages and defaults as the
@@ -29,6 +30,8 @@ import { CalibWorker } from '../loading/calib-client.js';
 import { buildSession, VIDEO_EXT } from '../loading/folder-loader.js';
 import { DetectionStore } from '../calib/detection-store.js';
 import { normalizeBoard, DEFAULT_BOARD, legacyPatternDiffers, numCorners, DICT_NAMES } from '../calib/board.js';
+import { CALIBIO_PRESETS, presetById, presetBoard, presetForBoard } from '../calib/board-presets.js';
+import { identifyCalibioBoard, AUTO_SEARCH, sizeAmbiguityText } from '../calib/board-identify.js';
 import { stridedFrames } from '../calib/frame-selection.js';
 import { distortionFlags, intrinsicsSamples } from '../calib/intrinsics.js';
 import { boardMotionScores, framesAboveMotion, motionSummary } from '../calib/motion.js';
@@ -50,19 +53,30 @@ Output:
   -o, --out FILE              calibration.toml (sleap-anipose format, as the app's Export) [required]
   --session-out FILE          also save a session (.calibrat3.json) the app can load
                               (open the same folder in the app, then "Load session")
-  --report FILE               JSON summary: detections, intrinsics, reprojection errors, timings
+  --report FILE               JSON summary: board used and how, per-camera errors and frames,
+                              detections, intrinsics, timings (also written when the run fails)
+
+Board (the session's board.toml, as in the app, unless --board is given):
+  --board B                   a calib.io board: preset id (calibio-300x200-coarse) or SKU
+                              (CCT300200C), or auto: identify the calib.io board from its markers.
+                              Replaces board.toml (which is then not read for the board)
+  --square L                  with --board auto (or board.toml preset = "auto"): the square size
+                              in mm, which picks the board's size when calib.io sells its grid in
+                              several; ignored with a fixed --board preset. Otherwise: the square
+                              side of a board described by the flags below
+  --board-x N --board-y N     board squares across / down
+  --marker L                  marker side, any unit (the calibration comes out in the square's unit)
+  --dict NAME                 ArUco dictionary, e.g. DICT_4X4_1000
+                              These override board.toml's values. Without a board.toml and
+                              without --board, all five (with --square) are required.
+  --board-pattern P           auto | new | legacy (OpenCV < 4.6 layout). Default: board.toml's
+                              legacy_pattern when there is a board.toml, else auto (probe both)
+  --list-boards               print the calib.io presets and exit
 
 Sampling and detection (stage 2):
   --target N                  frames to sample, evenly strided over the video (default 100)
   --all-frames                detect on every frame
   --fast-markers              search markers at half resolution on frames >= 1400 px (off)
-  --board-x N --board-y N     board squares across / down
-  --square L --marker L       square / marker side, any unit (the calibration comes out in it)
-  --dict NAME                 ArUco dictionary, e.g. DICT_4X4_1000
-                              The board comes from the session's board.toml; these flags override
-                              its values. Without a board.toml all five are required.
-  --board-pattern P           auto | new | legacy (OpenCV < 4.6 layout). Default: board.toml's
-                              legacy_pattern when there is a board.toml, else auto (probe both)
 
 Intrinsics (stage 3):
   --min-corners N             min corners per frame (default 6)
@@ -97,13 +111,16 @@ Resources:
   -v, --verbose               debug-level log lines
   -q, --quiet                 warnings and errors only
   -h, --help
+
+Exit status: 0 calibrated; 1 failed; 2 bad arguments; 3 the board could not be settled
+(Auto found no calib.io board, or a grid sold in several sizes without --square naming one).
 `;
 
 const OPTIONS = {
     out: { type: 'string', short: 'o' }, 'session-out': { type: 'string' }, report: { type: 'string' },
     target: { type: 'string' }, 'all-frames': { type: 'boolean' }, 'fast-markers': { type: 'boolean' },
     'board-x': { type: 'string' }, 'board-y': { type: 'string' }, square: { type: 'string' }, marker: { type: 'string' },
-    dict: { type: 'string' }, 'board-pattern': { type: 'string' },
+    dict: { type: 'string' }, 'board-pattern': { type: 'string' }, board: { type: 'string' }, 'list-boards': { type: 'boolean' },
     'min-corners': { type: 'string' }, 'max-calib-frames': { type: 'string' }, 'dist-model': { type: 'string' },
     reference: { type: 'string' }, 'min-covisible': { type: 'string' }, 'max-pair-frames': { type: 'string' }, 'max-motion': { type: 'string' },
     'no-sba': { type: 'boolean' }, 'sba-model': { type: 'string' }, 'sba-fixed-intrinsics': { type: 'boolean' }, 'sba-policy': { type: 'string' },
@@ -115,6 +132,8 @@ const OPTIONS = {
 };
 
 class UsageError extends Error {}
+/** The board could not be settled (Auto): exit status 3. */
+class BoardError extends Error {}
 
 // ---- logging ------------------------------------------------------------------
 
@@ -186,6 +205,7 @@ async function main(argv) {
     catch (e) { throw new UsageError(e.message); }
     const a = parsed.values;
     if (a.help) { process.stdout.write(HELP); return 0; }
+    if (a['list-boards']) { process.stdout.write(listBoards()); return 0; }
     VERBOSE = !!a.verbose; QUIET = !!a.quiet && !a.verbose;
     if (parsed.positionals.length !== 1) throw new UsageError('give exactly one session folder');
     if (!a.out) throw new UsageError('--out calibration.toml is required');
@@ -222,9 +242,22 @@ async function main(argv) {
     };
     const patternArg = choiceArg(a['board-pattern'], 'board-pattern', undefined, ['auto', 'new', 'legacy']);
     if (a.dict && !DICT_NAMES.includes(a.dict)) throw new UsageError(`--dict must be one of ${DICT_NAMES.join(', ')}`);
+    const boardReq = boardRequest(a);
     const timings = {};
-    const report = { generator: 'calibrat3-cli', created: new Date().toISOString(), options: { ...opts, sba: opts.sba ? refine : false }, timings };
+    const report = { generator: 'calibrat3-cli', created: new Date().toISOString(), ok: false, exitCode: null, error: null, options: { ...opts, sba: opts.sba ? refine : false }, timings };
+    const live = { root };   // what the run has got to so far: the report is written from it, also on failure
+    try {
+        return await calibrate({ a, root, cpus, ffmpeg, opts, refine, patternArg, boardReq, timings, report, live });
+    } catch (e) {
+        if (a.report) {
+            try { await writeReport(a.report, report, live, e); log(`wrote ${a.report} (run failed)`); }
+            catch (e2) { log(`could not write ${a.report}: ${e2.message}`, 'error'); }
+        }
+        throw e;
+    }
+}
 
+async function calibrate({ a, root, cpus, ffmpeg, opts, refine, patternArg, boardReq, timings, report, live }) {
     // ---- stage 1: session ----------------------------------------------------------
     const ff = ffmpegVersion(ffmpeg);
     log(`${ff.line}; ${cpus} CPU(s)${process.env.SLURM_CPUS_PER_TASK ? ' (SLURM_CPUS_PER_TASK)' : ''}; Node ${process.versions.node}`);
@@ -247,34 +280,17 @@ async function main(argv) {
     if (Math.max(...counts) !== totalFrames) log(`Frame counts differ across views (${counts.join(', ')}); using the minimum ${totalFrames}`, 'warn');
     const fps = views[0].info.fps;
     timings.probeMs = performance.now() - tProbe;
+    Object.assign(live, { session, views, totalFrames, fps });
 
-    let board;
-    {
-        const fromToml = session.board || null;
-        if (!fromToml) {
-            // No silent default board: a lab uses several boards, and a wrong one detects nothing.
-            const missing = ['board-x', 'board-y', 'square', 'marker', 'dict'].filter(k => a[k] === undefined);
-            if (missing.length) throw new UsageError(`no board.toml in ${root}: put one next to the videos (as the app's Export writes it), ` +
-                `or describe the board with ${missing.map(k => `--${k}`).join(', ')}`);
-            log('No board.toml; board from the command line');
-        } else log(`Board from ${session.boardPath}`);
-        const b = { ...DEFAULT_BOARD, ...(fromToml || {}) };
-        if (a['board-x']) b.boardX = intArg(a['board-x'], 'board-x', 8, 3);
-        if (a['board-y']) b.boardY = intArg(a['board-y'], 'board-y', 11, 3);
-        if (a.square) b.squareLength = numArg(a.square, 'square', 24);
-        if (a.marker) b.markerLength = numArg(a.marker, 'marker', 18.75);
-        if (a.dict) b.dictName = a.dict;
-        // The app: board.toml sets the pattern select explicitly; without one it stays on 'auto'.
-        const pattern = patternArg || (fromToml && fromToml.legacyPattern !== undefined ? (fromToml.legacyPattern ? 'legacy' : 'new') : 'auto');
-        b.legacyPattern = pattern === 'legacy';
-        board = normalizeBoard(b);
-        board.__pattern = pattern;
-    }
-    const pattern = board.__pattern; delete board.__pattern;
+    const spec = boardSpec(a, boardReq, session, patternArg, root);
+    live.boardInfo = spec.info;
+    let board = spec.board;           // null while Auto has to identify it
+    const pattern = spec.pattern;
 
     const { frames, stride } = opts.allFrames ? { frames: Array.from({ length: totalFrames }, (_, i) => i), stride: 1 } : stridedFrames(totalFrames, opts.target);
     const nViews = views.length;
     const names = views.map(v => v.name);
+    Object.assign(live, { names, frames, minCorners: opts.minCorners });
 
     // ---- stage 2: detection ----------------------------------------------------------
     installWebWorker();
@@ -285,11 +301,16 @@ async function main(argv) {
     const calib = new CalibWorker({ size: calibWorkers, log });
     try {
         await pool.init();
+        if (spec.auto) board = await autoBoard(views, frames, pool, { ffmpeg, ...spec.auto, info: spec.info });
         if (pattern === 'auto') board = await probePattern(board, views, pool, { ffmpeg, fastMarkers: opts.fastMarkers });
         await pool.configure(board, { fastMarkers: opts.fastMarkers });
-        log(`Board ${board.boardX}x${board.boardY} ${board.dictName}, square ${board.squareLength}, marker ${board.markerLength}${board.legacyPattern ? ', legacy (< 4.6) pattern' : ''}: ${numCorners(board)} corners`);
+        live.board = board;
+        const bp = settleBoardInfo(spec.info, board);
+        log(`Board ${board.boardX}x${board.boardY} ${board.dictName}, square ${board.squareLength}, marker ${board.markerLength}${board.legacyPattern ? ', legacy (< 4.6) pattern' : ''}: ${numCorners(board)} corners` +
+            ` — ${bp ? `calib.io ${bp.sku} (${bp.id})` : 'custom board'}, ${{ flag: '--board', 'board.toml': session.boardPath, 'board-flags': 'the board flags' }[spec.info.source]}${spec.info.method === 'auto' ? ' → Auto' : ''}`, 'success');
 
         const store = new DetectionStore(names);
+        live.store = store;
         for (const f of frames) store.touch(f);
         const totalJobs = frames.length * nViews;
         // The app caps each view at 2 frames in flight; with few cameras and many threads that
@@ -357,6 +378,7 @@ async function main(argv) {
             return res;
         }));
         timings.intrinsicsMs = performance.now() - tI;
+        live.intrinsics = intrinsics;
         const ok = intrinsics.filter(Boolean).length;
         log(`Intrinsics done for ${ok}/${nViews} cameras in ${fmtMs(timings.intrinsicsMs)}`, ok === nViews ? 'success' : 'warn');
         report.intrinsics = intrinsics.map((r, v) => r ? { name: names[v], rms: r.rmsError, framesUsed: r.framesUsed, framesValid: r.framesValid, coverage: r.coverage, K: r.K, dist: r.dist } : { name: names[v], error: true });
@@ -396,6 +418,7 @@ async function main(argv) {
         const reproject = (intr, extr) => calib.request('reprojection', { store: store.toPlain(), intrinsics: intrPayload(intr), extrinsics: extrPayload(extr), opts: { minCorners: 4, minViews: 2 } });
         let reproj = await reproject(intrinsics, extrinsics);
         const initialSummary = reproj.summary;
+        Object.assign(live, { extrinsics, reproj, refIdx });
         logReprojection('Cross-view reprojection (initial)', reproj.summary, names);
         timings.extrinsicsMs = performance.now() - tE;
         report.initial = { reprojection: reproj.summary, cameras: camerasOf(names, intrinsics, extrinsics) };
@@ -423,6 +446,7 @@ async function main(argv) {
                     : best.intr;
                 for (const r of intrinsics) if (r && best.config.optimize_intrinsics) r.refinedBySba = true;
                 sbaResult = sbaResultRecord(refined);
+                Object.assign(live, { intrinsics, extrinsics, reproj });
             }
             timings.sbaMs = performance.now() - tS;
             report.sba = {
@@ -442,6 +466,7 @@ async function main(argv) {
         const missing = names.filter((_, i) => !intrinsics[i] || !extrinsics[i] || extrinsics[i].error);
         if (missing.length) log(`not in the TOML (no calibration): ${missing.join(', ')}`, 'warn');
         await writeFile(a.out, toml);
+        live.inToml = new Set(names.filter((_, i) => intrinsics[i] && extrinsics[i] && !extrinsics[i].error));
         log(`wrote ${a.out}`, 'success');
         if (a['session-out']) {
             const state = {
@@ -456,10 +481,7 @@ async function main(argv) {
         }
         timings.totalMs = performance.now() - T0;
         if (a.report) {
-            report.session = { name: session.rootName, layout: session.layout, root: path.resolve(root), totalFrames, fps, views: views.map(v => ({ name: v.name, path: v.path, ...v.info })) };
-            report.board = board;
-            report.referenceView = refIdx;
-            await writeFile(a.report, JSON.stringify(report, null, 1));
+            await writeReport(a.report, report, live, null);
             log(`wrote ${a.report}`, 'success');
         }
         log(`done in ${fmtMs(timings.totalMs)} (detection ${fmtMs(timings.detectionMs)}, intrinsics ${fmtMs(timings.intrinsicsMs)}, extrinsics ${fmtMs(timings.extrinsicsMs)}${timings.sbaMs !== undefined ? `, SBA ${fmtMs(timings.sbaMs)}` : ''})`, 'success');
@@ -468,6 +490,257 @@ async function main(argv) {
         pool.terminate();
         calib.terminate();
     }
+}
+
+// ---- board: --board, board.toml, Auto ------------------------------------------------
+
+function listBoards() {
+    const rows = CALIBIO_PRESETS.map(p => [p.id, p.sku, `${p.rows} x ${p.cols}`, `${p.squareLength} / ${p.markerLength} mm`, `${p.plate[0]} x ${p.plate[1]} mm ${p.pattern}${p.material === 'ceramic' ? ' (ceramic)' : ''}`]);
+    const head = ['preset id', 'SKU', 'rows x cols', 'square / marker', 'plate'];
+    const w = head.map((h, k) => Math.max(h.length, ...rows.map(r => r[k].length)));
+    const line = (r) => r.map((c, k) => c.padEnd(w[k])).join('  ').trimEnd();
+    return [line(head), ...rows.map(line), '', `All ${CALIBIO_PRESETS[0].dictName}, first marker id 0 (${CALIBIO_PRESETS[0].source}).`,
+        '--board auto identifies one of these from its markers; --square <mm> picks the size of a grid sold in several.', ''].join('\n');
+}
+
+/** --board and --square as given: {flag, preset, auto, square}. */
+function boardRequest(a) {
+    let square = null;
+    if (a.square !== undefined) {
+        square = Number(a.square);
+        if (!(Number.isFinite(square) && square > 0)) throw new UsageError(`--square must be a number > 0 (got ${a.square})`);
+    }
+    if (a.board === undefined) return { flag: null, preset: null, auto: false, square };
+    const key = a.board.trim();
+    const auto = key.toLowerCase() === 'auto';
+    const preset = auto ? null : presetById(key);
+    if (!auto && !preset) {
+        throw new UsageError(`--board ${a.board}: not a calib.io board preset (known: auto, ${CALIBIO_PRESETS.map(p => `${p.id} = ${p.sku}`).join(', ')}; see --list-boards). ` +
+            'Describe another board in board.toml, or with --board-x, --board-y, --square, --marker and --dict');
+    }
+    const custom = ['board-x', 'board-y', 'marker', 'dict'].filter(k => a[k] !== undefined);
+    if (custom.length) throw new UsageError(`--board ${a.board} sets the whole board: drop ${custom.map(k => `--${k}`).join(', ')}, or describe a custom board with them and no --board`);
+    return { flag: key, preset, auto, square };
+}
+
+/**
+ * Which board to detect, and how it was chosen (the report's `board`). --board replaces
+ * board.toml. Otherwise board.toml as the app reads it: `preset = "auto"` (square_length, or
+ * --square, is Auto's size hint) or a preset whose values the file's own override, then the
+ * board flags override the file's values; without a board.toml, the five board flags.
+ * @returns {{board: object|null (null: Auto identifies it), pattern: 'auto'|'new'|'legacy',
+ *            auto: {squareHint, squareHintFrom}|null, info: object}}
+ */
+function boardSpec(a, req, session, patternArg, root) {
+    const fromToml = session.board || null;
+    const info = {
+        preset: null, sku: null, label: null, source: null, requested: null, method: null,
+        boardToml: session.boardPath || null, boardTomlUsed: false, overrides: [], notes: [], auto: null,
+    };
+    const note = (msg) => { info.notes.push(msg); log(msg); };
+    // calib.io boards all have odd rows, where the old and new layouts are the same board.
+    const presetPattern = () => {
+        if (patternArg && patternArg !== 'new') note(`--board-pattern ${patternArg} ignored: calib.io boards have an odd number of rows, where both layouts are the same board`);
+        return 'new';
+    };
+    const customFlags = ['board-x', 'board-y', 'marker', 'dict'].filter(k => a[k] !== undefined);
+
+    if (req.flag) {
+        info.source = 'flag';
+        info.requested = req.auto ? 'auto' : req.preset.id;
+        if (session.boardPath) note(`${session.boardPath} not used: --board ${req.flag} sets the board`);
+        const pattern = presetPattern();
+        if (req.auto) {
+            info.method = 'auto';
+            return { board: null, pattern, auto: { squareHint: req.square, squareHintFrom: req.square !== null ? 'flag' : null }, info };
+        }
+        info.method = 'preset';
+        if (req.square !== null) note(`--square ${req.square} ignored: ${req.preset.id} (${req.preset.sku}) has ${req.preset.squareLength} mm squares`);
+        return { board: presetBoard(req.preset), pattern, auto: null, info };
+    }
+
+    if (fromToml && fromToml.preset === 'auto') {
+        Object.assign(info, { source: 'board.toml', requested: 'auto', method: 'auto', boardTomlUsed: true });
+        if (customFlags.length) {
+            throw new UsageError(`${session.boardPath} says preset = "auto": Auto identifies the board, so ${customFlags.map(k => `--${k}`).join(', ')} can't set it ` +
+                '(give --square for its size, or --board <preset>)');
+        }
+        const fileSquare = Number(fromToml.squareLength) > 0 ? Number(fromToml.squareLength) : null;
+        const squareHint = req.square !== null ? req.square : fileSquare;
+        const squareHintFrom = req.square !== null ? 'flag' : (fileSquare !== null ? 'board.toml' : null);
+        if (req.square !== null && fileSquare !== null) info.overrides.push('square');
+        log(`Board from ${session.boardPath}: preset = "auto", the calib.io board is identified from its markers` +
+            (squareHint !== null ? `; square size ${squareHint} mm (${squareHintFrom === 'flag' ? '--square' : 'square_length'})` : ''));
+        return { board: null, pattern: presetPattern(), auto: { squareHint, squareHintFrom }, info };
+    }
+
+    if (!fromToml) {
+        // A board.toml that does not parse (an unknown preset name, say) is not "no board.toml".
+        const broken = session.notes.find(n => /^Failed to parse .*board\.toml/i.test(n));
+        if (broken) throw new UsageError(`${broken}: fix it, or name the board with --board <preset|auto>`);
+        // No silent default board: a lab uses several boards, and a wrong one detects nothing.
+        const missing = ['board-x', 'board-y', 'square', 'marker', 'dict'].filter(k => a[k] === undefined);
+        if (missing.length) {
+            throw new UsageError(`no board.toml in ${root}: put one next to the videos (as the app's Export writes it), ` +
+                `name a calib.io board with --board <preset|auto>, or describe the board with ${missing.map(k => `--${k}`).join(', ')}`);
+        }
+        info.source = 'board-flags';
+        log('No board.toml; board from the command line');
+    } else {
+        Object.assign(info, { source: 'board.toml', boardTomlUsed: true });
+        log(`Board from ${session.boardPath}${fromToml.preset ? ` (preset = "${fromToml.preset}")` : ''}`);
+    }
+    info.requested = fromToml && fromToml.preset ? fromToml.preset : 'custom';
+    const b = { ...DEFAULT_BOARD, ...(fromToml || {}) };
+    delete b.preset;
+    const set = (flag, key, value) => { b[key] = value; if (fromToml) info.overrides.push(flag); };
+    if (a['board-x']) set('board-x', 'boardX', intArg(a['board-x'], 'board-x', 8, 3));
+    if (a['board-y']) set('board-y', 'boardY', intArg(a['board-y'], 'board-y', 11, 3));
+    if (req.square !== null) set('square', 'squareLength', req.square);
+    if (a.marker) set('marker', 'markerLength', numArg(a.marker, 'marker', 18.75));
+    if (a.dict) set('dict', 'dictName', a.dict);
+    // The app: board.toml sets the pattern select explicitly; without one it stays on 'auto'.
+    const pattern = patternArg || (fromToml && fromToml.legacyPattern !== undefined ? (fromToml.legacyPattern ? 'legacy' : 'new') : 'auto');
+    b.legacyPattern = pattern === 'legacy';
+    const board = normalizeBoard(b);
+    const named = fromToml && fromToml.preset ? presetById(fromToml.preset) : null;
+    info.method = named && presetForBoard(board) === named ? 'preset' : 'custom';
+    if (named && info.method === 'custom') {
+        note(`${session.boardPath} names preset ${named.id}, but ${info.overrides.length ? 'with the command line\'s values' : 'its own values'} the board is not exactly that preset: using the values (as the app does)`);
+    }
+    return { board, pattern, auto: null, info };
+}
+
+/** The board's preset (value for value) into `info`; returns it or null. */
+function settleBoardInfo(info, board) {
+    const p = presetForBoard(board);
+    Object.assign(info, { preset: p ? p.id : null, sku: p ? p.sku : null, label: p ? p.label : null });
+    return p;
+}
+
+/**
+ * Auto: ArUco markers (no board) of every view on frames spread over the sampled ones, until
+ * calib/board-identify.js decides, as the app's Detect stage does (it starts with the frame on
+ * screen). Fills `info.auto` with the evidence; returns the preset's board, or throws BoardError
+ * with the app's message (the sizes when calib.io sells the grid in several).
+ */
+async function autoBoard(views, frames, pool, { ffmpeg, squareHint, squareHintFrom, info }) {
+    const t0 = performance.now();
+    const { dicts, enough, maxFrames } = AUTO_SEARCH;
+    const want = Math.min(maxFrames, frames.length);
+    const picks = [];
+    for (let k = 0; k < want; k++) {
+        const f = frames[Math.floor(((k + 0.5) * frames.length) / want)];
+        if (f !== undefined && !picks.includes(f)) picks.push(f);
+    }
+    log(`Auto (calib.io): looking for markers (${dicts.join(', ')}) on up to ${picks.length} frames × ${views.length} views${squareHint !== null ? `, square size ${squareHint} mm` : ', no square size given'}`);
+    const obs = [], searched = [];
+    let framesWithMarkers = 0, images = 0;
+    let r = identifyCalibioBoard(obs, { squareHint });
+    for (const frame of picks) {
+        const res = await Promise.all(views.map(async (view, v) => {
+            if (frame >= view.info.totalFrames) return null;
+            const fps = view.info.fps || 30;
+            const gray = await grayFrameAt(view.file, frame / fps, { width: view.info.width, height: view.info.height, ffmpeg, decodedWidth: view.info.decodedWidth, decodedHeight: view.info.decodedHeight });
+            if (!gray) return null;
+            images++;
+            return pool.markers({ frame, view: v, gray, width: view.info.width, height: view.info.height, dictNames: dicts, enough });
+        }));
+        searched.push(frame);
+        let any = false;
+        for (const m of res) {
+            if (!m) continue;
+            for (const x of m.results) { obs.push({ frame, view: m.view, dictName: x.dictName, ids: x.ids, corners: x.corners }); if (x.ids.length) any = true; }
+        }
+        if (any) framesWithMarkers++;
+        r = identifyCalibioBoard(obs, { squareHint });
+        log(`Auto (calib.io), frame ${frame}: ${r.status} — ${r.reason}`, 'debug');
+        if (r.status === 'match' || r.status === 'size-ambiguous') break;
+        if (r.status === 'no-match' && framesWithMarkers >= 3) break;
+    }
+    const ms = performance.now() - t0;
+    info.auto = {
+        status: r.status, reason: r.reason, picked: r.preset ? r.preset.id : null,
+        candidates: r.candidates.map(p => p.id), grid: r.grid, dictName: r.dictName,
+        squareHint, squareHintFrom, markersSeen: r.markersSeen, maxId: r.maxId,
+        framesSearched: searched, framesWithMarkers, images,
+        scores: r.scores.map(x => ({ rows: x.rows, cols: x.cols, markers: x.markers, agree: x.agree, pairs: x.pairs, fraction: x.fraction, outOfRange: x.outOfRange, ruledOut: !!x.ruledOut })),
+        ms,
+    };
+    if (r.status === 'match') {
+        log(`Auto (calib.io): ${r.preset.label} (${r.preset.sku}), found in ${fmtMs(ms)} — ${r.reason}`, 'success');
+        return presetBoard(r.preset);
+    }
+    if (r.status === 'size-ambiguous') {
+        log(`Auto (calib.io): ${r.reason}`, 'warn');
+        throw new BoardError(`Auto (calib.io): ${sizeAmbiguityText(r)} Pick yours with --board ${r.candidates.map(p => p.id).join(' or --board ')}, ` +
+            `or give its square size with --square${squareHint !== null ? ` (the square size given, ${squareHint} mm, is none of them)` : ''}.`);
+    }
+    throw new BoardError(`Auto (calib.io): no calib.io board identified (${r.reason}). ` +
+        'Describe the board instead: its values in board.toml, or --board-x, --board-y, --square, --marker and --dict without --board.');
+}
+
+// ---- report ---------------------------------------------------------------------------
+
+/**
+ * Write report.json from what the run got to (`live`), also when it failed (`err`): ok,
+ * exitCode, error, session, board (which and how), referenceView, cameras (one row per view).
+ */
+async function writeReport(file, report, live, err) {
+    report.ok = !err;
+    report.exitCode = err ? exitCodeOf(err) : 0;
+    report.error = err ? err.message : null;
+    if (report.timings.totalMs === undefined) report.timings.totalMs = performance.now() - T0;
+    const { session, views } = live;
+    if (session && views) {
+        report.session = { name: session.rootName, layout: session.layout, root: path.resolve(live.root), totalFrames: live.totalFrames, fps: live.fps, views: views.map(v => ({ name: v.name, path: v.path, ...v.info })) };
+    }
+    if (live.boardInfo) {
+        const b = live.board || null;
+        const { auto, ...how } = live.boardInfo;
+        report.board = {
+            ...how,
+            ...(b ? { boardX: b.boardX, boardY: b.boardY, squareLength: b.squareLength, markerLength: b.markerLength, dictName: b.dictName, legacyPattern: b.legacyPattern } : {}),
+            auto,
+        };
+    }
+    report.referenceView = live.refIdx ?? null;
+    const names = live.names || (views ? views.map(v => v.name) : null);
+    if (names) report.cameras = names.map((name, v) => cameraRow(live, name, v));
+    // Key order: the answer first.
+    const { generator, created, ok, exitCode, error, board, cameras, ...rest } = report;
+    await writeFile(file, JSON.stringify({ generator, created, ok, exitCode, error, board, cameras, ...rest }, null, 1));
+}
+
+/** One camera's row of report.cameras. */
+function cameraRow(live, name, v) {
+    const { store, frames, intrinsics, extrinsics, reproj, inToml } = live;
+    let framesWithBoard = null, framesUsable = null;
+    if (store && frames) {
+        framesWithBoard = 0; framesUsable = 0;
+        for (const f of frames) {
+            const n = store.count(f, v);
+            if (n > 0) framesWithBoard++;
+            if (n >= live.minCorners) framesUsable++;
+        }
+    }
+    const pv = reproj && reproj.summary.perView[v];
+    const intr = intrinsics ? intrinsics[v] : null, extr = extrinsics ? extrinsics[v] : null;
+    const inCalibration = !!(inToml && inToml.has(name));
+    let reason = null;
+    if (!inCalibration) {
+        if (intrinsics && !intr) reason = 'no intrinsics (too few frames with the board)';
+        else if (extrinsics && (!extr || extr.error)) reason = (extr && extr.error) || 'no extrinsics (not linked to the reference camera)';
+        else reason = 'the run stopped before writing calibration.toml';
+    }
+    return {
+        name,
+        inCalibration, reason,
+        framesSampled: frames ? frames.length : null,
+        framesWithBoard, framesUsable,
+        reprojectionPx: pv && pv.n ? { median: pv.median, p95: pv.p95, mean: pv.mean, max: pv.max, observations: pv.n } : null,
+        intrinsicsRmsPx: intr ? intr.rmsError : null,
+    };
 }
 
 /**
@@ -519,8 +792,11 @@ function medianOf(arr) {
     return x.length ? x[x.length >> 1] : NaN;
 }
 
+const exitCodeOf = (e) => (e instanceof UsageError ? 2 : e instanceof BoardError ? 3 : 1);
+
 main(process.argv.slice(2)).then((code) => { process.exitCode = code; }, (e) => {
     if (e instanceof UsageError) { process.stderr.write(`calibrate: ${e.message}\n(see --help)\n`); process.exitCode = 2; return; }
+    if (e instanceof BoardError) { log(e.message, 'error'); process.exitCode = 3; return; }
     log(e.stack || e.message, 'error');
     process.exitCode = 1;
 });

@@ -42,7 +42,9 @@ count fits ~all pairs, a wrong one misplaces every pair across rows. Size from `
 only (an image can't tell two sizes of a grid apart). Exports: `identifyCalibioBoard(obs,
 {squareHint})` → `{status: match | size-ambiguous | undecided | no-match, preset, candidates,
 grid, scores, reason}`, `scoreGridsOnImage`, `markerSquares(rows, cols, legacy)`, `dictFamily`,
-`IDENTIFY_DEFAULTS`. Imports: board-presets.
+`IDENTIFY_DEFAULTS`, `AUTO_SEARCH` (dictionaries tried, markers that are `enough`, frames
+looked at: shared by the app and the command line), `sizeAmbiguityText(r)` (the "which size?"
+sentence of a size-ambiguous result; each caller adds how to pick). Imports: board-presets.
 
 ### calib/geometry.js
 Rotations/poses/projection in pure JS. Exports: `rodriguesToMatrix`, `matrixToRodrigues`,
@@ -186,7 +188,7 @@ Auto for board.toml `preset = "auto"`), the Board preset select (Custom / Auto /
 boards; a preset fills and locks the fields; `boardPresetChoice`), `?board=` / `?square=`
 URL parameters (`boardSetByUrl`: a URL board wins over board.toml), Auto (`resolvePreset`
 before the pattern probe: `pool.markers` on the current frame then up to 11 more, through
-calib/board-identify, cached per session), sampling info, `detectCurrentFrame`,
+calib/board-identify's `AUTO_SEARCH` and `sizeAmbiguityText`, cached per session), sampling info, `detectCurrentFrame`,
 `runBatchDetection` (sequential decode → pool, in-flight cap, cancel, throttled
 progress, summary log), `renderResults` (strip + virtual table + filters), `stepSampled`.
 Imports: app-state, calib/detection-store, calib/board, calib/board-presets,
@@ -295,7 +297,15 @@ without a browser: scan the folder (`buildSession`), probe each video, stride th
 (`stridedFrames`), batch detection (DetectorPool, gray frames from ffmpeg), intrinsics /
 extrinsics / reprojection (CalibWorker requests), `refineCalibration`, then
 `calibrationTomlFromResults`; optional `--session-out` (`serializeSession`) and `--report`
-(JSON). Same defaults as the app's form. `--help` lists every option.
+(JSON, also written when the run fails: `ok`, `exitCode`, `error`, `board` — which board and how
+it was chosen, with Auto's evidence — and `cameras`, one row per view; fields in README.md).
+The board (`boardRequest`, `boardSpec`): `--board <preset id | SKU | auto>` replaces board.toml;
+otherwise board.toml as the app reads it (its `preset` key, `"auto"` included), with the board
+flags overriding its values; without either, all five board flags. Auto (`autoBoard`): `pool.markers`
+on gray frames (fast seek) spread over the sampled frames, every view, through
+`identifyCalibioBoard` with `--square` (or board.toml's `square_length`) as the size hint; when
+it can't decide, exit 3 with the app's message. `--list-boards`. Same defaults as the app's form.
+`--help` lists every option. Imports (besides the pipeline): calib/board-presets, calib/board-identify.
 
 ### cli/ffmpeg-video.mjs
 `probeVideo(file)` — the app's frame table (sample-table.js + mp4box: count, size, fps,
@@ -329,6 +339,9 @@ with `--session-out` / `--report` next to the TOML.
 - `cli/test-ffmpeg-frames.mjs` (Node only, needs ffmpeg) — ffmpeg frame N is the app's frame N
   on B-frame videos (H.264, fragmented H.264, fragmented HEVC) whose frames show their own
   number as a barcode (`cli/barcode-video.mjs`).
+- `cli/test-cli-board.mjs` (Node only, needs ffmpeg) — `--list-boards`, bad `--board` (exit 2),
+  Auto on the sample session's DICT_4X4 board (exit 3, report written), board.toml
+  `preset = "auto"`, and the report's `ok` / `board` / `cameras` fields on a full run.
 - `e2e/smoke-pipeline.mjs`, `e2e/stress-synthetic.mjs`, `e2e/real-session.mjs`,
   `e2e/board-presets.mjs` (presets, Auto, `?board=`, on a synthetic calib.io session) — Playwright,
   headless Chromium, real workers/WebCodecs/WASM. `e2e/cli-parity.mjs` — the command line vs
