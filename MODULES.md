@@ -25,6 +25,25 @@ Exports: `DICT_NAMES`, `DEFAULT_BOARD`, `normalizeBoard`, `boardKey`, `numCorner
 `allCornerObjectPoints`, `boardSize`, `dictNameFromToml`, `tomlFromDictName`.
 Imports: none.
 
+### calib/board-presets.js
+The 13 ChArUco boards calib.io sells, as data (`CALIBIO_PRESETS`: id
+`calibio-<plate>-<coarse|fine>`, SKU, plate, rows, cols, square/marker mm, dictionary
+`DICT_5X5_1000`, first id 0, legacy false, label, source URL), with what calib.io's page
+does not state and how it is filled in. Exports: `CALIBIO_PRESETS`, `CALIBIO_DICT`,
+`CALIBIO_SOURCE`, `presetById` (id or SKU), `presetBoard` (→ board config: cols = squares X),
+`presetForBoard` (value-for-value match or null), `presetGrids`, `gridMarkerCount`.
+Imports: board.
+
+### calib/board-identify.js
+Which calib.io board is in the video, from `detectMarkers` output (dictionary, ids, each
+marker's 4 corners). For marker pairs near each other in the image, each candidate grid
+predicts the second marker from the first one's corners and both ids; the right column
+count fits ~all pairs, a wrong one misplaces every pair across rows. Size from `squareHint`
+only (an image can't tell two sizes of a grid apart). Exports: `identifyCalibioBoard(obs,
+{squareHint})` → `{status: match | size-ambiguous | undecided | no-match, preset, candidates,
+grid, scores, reason}`, `scoreGridsOnImage`, `markerSquares(rows, cols, legacy)`, `dictFamily`,
+`IDENTIFY_DEFAULTS`. Imports: board-presets.
+
 ### calib/geometry.js
 Rotations/poses/projection in pure JS. Exports: `rodriguesToMatrix`, `matrixToRodrigues`,
 `matrixToQuaternion`, `quaternionToMatrix`, `quaternionToRodrigues`, `rodriguesToQuaternion`,
@@ -148,11 +167,17 @@ base). Colormaps `viridisLike`, `errorColormap`.
 `updateExclusions`, `setCurrent`; IntersectionObserver-lazy object URLs.
 
 ### ui/stage-detect.js
-Board form (`getBoardFromForm`, `setBoardForm`), sampling info, `detectCurrentFrame`,
+Board form (`getBoardFromForm`, `setBoardForm`: also selects the preset the values are, or
+Auto for board.toml `preset = "auto"`), the Board preset select (Custom / Auto / the calib.io
+boards; a preset fills and locks the fields; `boardPresetChoice`), `?board=` / `?square=`
+URL parameters (`boardSetByUrl`: a URL board wins over board.toml), Auto (`resolvePreset`
+before the pattern probe: `pool.markers` on the current frame then up to 11 more, through
+calib/board-identify, cached per session), sampling info, `detectCurrentFrame`,
 `runBatchDetection` (sequential decode → pool, in-flight cap, cancel, throttled
 progress, summary log), `renderResults` (strip + virtual table + filters), `stepSampled`.
-Imports: app-state, calib/detection-store, calib/board, calib/frame-selection, log-panel,
-stages, frame-strip, virtual-table, events, video-panel.
+Imports: app-state, calib/detection-store, calib/board, calib/board-presets,
+calib/board-identify, calib/frame-selection, log-panel, stages, frame-strip, virtual-table,
+events, video-panel.
 
 ### ui/stage-intrinsics.js
 `setupIntrinsicsStage`, `computeIntrinsics` (per-camera worker requests with progress),
@@ -198,11 +223,13 @@ samples' when the header says 0. Exports: `readSampleTable`, `completeSamples`,
 `importScripts` opencv.js; caches dictionary/board/detectors per board key; `detect`
 draws the transferred VideoFrame/ImageBitmap to an OffscreenCanvas, runs
 `detectMarkers` + `detectBoard`, optional JPEG thumbnail; replies with transferred
-typed arrays.
+typed arrays. `markers` request: ArUco markers only (no board configured), in each of a list
+of dictionaries until one finds enough, with every marker's 4 corners (board identification).
 
 ### loading/detect-pool.js
 `DetectorPool({size, log})` — `init`, `configure(board)`, `detect({frame, view, image,
-width, height, wantThumb})` → Promise, least-loaded dispatch, `stats`, `terminate`.
+width, height, wantThumb})` → Promise, `markers({frame, view, image, width, height,
+dictNames, enough})` → Promise (no configure needed), least-loaded dispatch, `stats`, `terminate`.
 
 ### loading/calib-worker.js  (classic worker)
 `importScripts` opencv.js + dynamic `import()` of calib modules and the sba wrapper.
@@ -227,7 +254,10 @@ intrinsics run in parallel; `init`, `request(type, payload, {onProgress})`, `ter
 
 ### import-export/toml.js
 `generateCalibrationToml(cameras, meta)`, `parseCalibrationToml`, `generateBoardToml`,
-`parseBoardToml`, `parseSimpleToml`, `parseTomlTables`. Imports: calib/board.
+`parseBoardToml`, `parseSimpleToml`, `parseTomlTables`. board.toml's `preset` key: a preset
+id or SKU fills the values the file leaves out (the file's own win), `"auto"` sets
+`board.preset = 'auto'`; the writer adds `preset = "<id>"` when the board is a preset.
+Imports: calib/board, calib/board-presets.
 
 ### import-export/sba-json.js
 `generateCalibrationJson(state)` — cameras, board, observations, triangulated points,
@@ -245,11 +275,13 @@ SBA + reprojection metadata (flat arrays). Imports: calib/board.
 - `run-mjs-tests.mjs` — runs each `test-*.mjs` in its own Node process.
 - `test-runner.html` — imports the same `test-*.mjs` files in the browser
   (`/tests/test-runner.html`, also on GitHub Pages).
-- `test-board`, `test-geometry`, `test-detection-store`, `test-covisibility`,
+- `test-board`, `test-board-presets`, `test-board-identify`, `test-geometry`, `test-detection-store`, `test-covisibility`,
   `test-frame-selection`, `test-folder-loader`, `test-sba`, `test-toml`.
-- `e2e/smoke-pipeline.mjs`, `e2e/stress-synthetic.mjs`, `e2e/real-session.mjs` — Playwright,
+- `e2e/smoke-pipeline.mjs`, `e2e/stress-synthetic.mjs`, `e2e/real-session.mjs`,
+  `e2e/board-presets.mjs` (presets, Auto, `?board=`, on a synthetic calib.io session) — Playwright,
   headless Chromium, real workers/WebCodecs/WASM. See `e2e/README.md`.
 
 ## scripts/
 - `make_synthetic_session.py` — renders an N-camera, M-frame synthetic ChArUco session
-  (anipose-style layout) with `calibration_gt.toml` ground truth for the stress test.
+  (anipose-style layout) with `calibration_gt.toml` ground truth for the stress test; any
+  board (`--board-x/--board-y/--square/--marker/--dict-bits`), `--board-toml auto|none`.

@@ -8,7 +8,7 @@ import { state, controllers } from '../ui/app-state.js';
 import { initLogPanel, log, fmtMs } from '../ui/log-panel.js';
 import { $, setupStageHeaders, showError, setStageStatus, expandStage, setEnabled } from '../ui/stages.js';
 import { setupVideoPanel, loadSession, registerKeyHandler } from '../ui/video-panel.js';
-import { setupDetectStage, setBoardForm, renderResults as renderDetections } from '../ui/stage-detect.js';
+import { setupDetectStage, setBoardForm, boardSetByUrl, boardPresetChoice, renderResults as renderDetections } from '../ui/stage-detect.js';
 import { setupIntrinsicsStage, toggleIntrinsicsExclusion, stepWorst as stepWorstIntr, renderResults as renderIntrinsics } from '../ui/stage-intrinsics.js';
 import { setupExtrinsicsStage, toggleExtrinsicsExclusion, stepWorst as stepWorstExtr } from '../ui/stage-extrinsics.js';
 import { setupExportStage } from '../ui/stage-export.js';
@@ -104,9 +104,13 @@ async function openSession(session) {
         return false;
     }
     const ok = await loadSession(session);
-    if (ok && session.board) {
+    if (ok && session.board && boardSetByUrl()) {
+        log(`Board: ${session.boardPath} not used, the page URL's ?board=${boardSetByUrl()} sets it`, 'warn');
+    } else if (ok && session.board) {
         setBoardForm(session.board, session.boardPath || 'board.toml');
-        log(`Board from ${session.boardPath}: ${session.board.boardX}x${session.board.boardY}, square ${session.board.squareLength}, marker ${session.board.markerLength}, ${session.board.dictName || 'dictionary unchanged'}`, 'success');
+        const b = state.board, choice = boardPresetChoice();
+        log(`Board from ${session.boardPath}: ${choice === 'auto' ? 'Auto (calib.io), identified when you detect; ' : (choice !== 'custom' ? `preset ${choice}, ` : '')}` +
+            `${b.boardX}x${b.boardY}, square ${b.squareLength}, marker ${b.markerLength}, ${b.dictName}`, 'success');
     }
     return ok;
 }

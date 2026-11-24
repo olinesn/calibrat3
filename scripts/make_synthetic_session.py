@@ -18,6 +18,11 @@ Usage (with uv):
         scripts/make_synthetic_session.py --out /tmp/synthetic_session --frames 1200 --cams 4
 Or with pip-installed numpy, opencv-contrib-python-headless, imageio-ffmpeg:
     python3 scripts/make_synthetic_session.py --out /tmp/synthetic_session
+
+Another board: --board-x/--board-y (squares), --square/--marker (mm), --dict-bits/--dict-size;
+--board-toml auto writes only `preset = "auto"` (the app then identifies a calib.io board
+from the video), none writes no board.toml. calib.io's 300 x 200 mm coarse board:
+    --board-x 14 --board-y 9 --square 20 --marker 15 --dict-bits 5 --board-toml auto
 """
 import argparse
 import math
@@ -57,6 +62,7 @@ def toml_list(v):
 
 
 def main():
+    global BOARD_X, BOARD_Y, SQUARE, MARKER, DICT
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--frames", type=int, default=1200)
@@ -67,7 +73,17 @@ def main():
     ap.add_argument("--gop", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--noise", type=float, default=4.0, help="pixel noise sigma")
+    ap.add_argument("--board-x", type=int, default=BOARD_X, help="squares across")
+    ap.add_argument("--board-y", type=int, default=BOARD_Y, help="squares down")
+    ap.add_argument("--square", type=float, default=SQUARE, help="square side, mm")
+    ap.add_argument("--marker", type=float, default=MARKER, help="marker side, mm")
+    ap.add_argument("--dict-bits", type=int, default=4, choices=(4, 5, 6, 7))
+    ap.add_argument("--dict-size", type=int, default=1000, choices=(50, 100, 250, 1000))
+    ap.add_argument("--board-toml", default="values", choices=("values", "auto", "none"),
+                    help="values: the board's values; auto: only preset = \"auto\"; none: no board.toml")
     args = ap.parse_args()
+    BOARD_X, BOARD_Y, SQUARE, MARKER = args.board_x, args.board_y, args.square, args.marker
+    DICT = getattr(cv2.aruco, f"DICT_{args.dict_bits}X{args.dict_bits}_{args.dict_size}")
 
     rng = np.random.default_rng(args.seed)
     W, H = args.width, args.height
@@ -119,8 +135,13 @@ def main():
     center = np.array([BOARD_X * SQUARE / 2, BOARD_Y * SQUARE / 2, 0])
 
     # --- write board.toml + ground-truth calibration.toml
-    with open(os.path.join(args.out, "board.toml"), "w") as fh:
-        fh.write(f"board_x = {BOARD_X}\nboard_y = {BOARD_Y}\nsquare_length = {SQUARE}\nmarker_length = {MARKER}\nmarker_bits = 4\ndict_size = 1000\n")
+    if args.board_toml != "none":
+        with open(os.path.join(args.out, "board.toml"), "w") as fh:
+            if args.board_toml == "auto":
+                fh.write('preset = "auto"\n')
+            else:
+                fh.write(f"board_x = {BOARD_X}\nboard_y = {BOARD_Y}\nsquare_length = {SQUARE}\nmarker_length = {MARKER}\n"
+                         f"marker_bits = {args.dict_bits}\ndict_size = {args.dict_size}\n")
     # Express ground truth relative to camera 0 (world = cam 0), matching the app's convention.
     R0, t0 = cams[0]["R"], cams[0]["t"]
     with open(os.path.join(args.out, "calibration_gt.toml"), "w") as fh:
