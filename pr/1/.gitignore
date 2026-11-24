@@ -1,9 +1,0 @@
-*.log
-.DS_Store
-/scratch/
-__pycache__/
-node_modules
-node_modules/
-tests/e2e/.playwright/
-tests/e2e/node_modules
-tests/e2e/node_modules/
