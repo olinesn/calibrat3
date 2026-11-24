@@ -42,3 +42,8 @@ Environment: `BASE=http://host:port` (default `http://localhost:8080`),
   every frame, runs intrinsics/extrinsics/SBA, compares against the generator's
   ground-truth `calibration.toml`, and reports wall-clock timings. Requires
   `SESSION=/path/to/synthetic_session`.
+- **`board-presets.mjs`** — the Board preset select (calib.io boards fill and lock the
+  form), Auto identifying calib.io's 300 × 200 mm coarse board from a synthetic session
+  (`make_synthetic_session.py … --board-x 14 --board-y 9 --square 20 --marker 15
+  --dict-bits 5 --board-toml auto`), `?board=` / `?square=`, and Auto falling back to
+  Custom on the sample session. Requires `SESSION=/path/to/that_session`.

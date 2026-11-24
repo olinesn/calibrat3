@@ -24,7 +24,9 @@ Read the documentation at https://talmolab.github.io/luc3d-docs/#camera-calibrat
   - flat: `{root}/{view}.mp4`
   - anipose-style: `{root}/{view}/calibration_images/*.mp4` (also `calibration/`)
 
-  A `board.toml` next to the videos fills in the board form.
+  A `board.toml` next to the videos fills in the board form. A calib.io ChArUco board can be
+  picked from *Board preset*, or found from its markers with *Auto* (`?board=auto`,
+  `?board=CCT300200C`, or `preset = "…"` in board.toml for headless runs).
 - **Batch ChArUco detection that scales.** One sequential decode pass per view feeds
   a pool of OpenCV.js web workers (detectors built once per board config). Frames
   are never drawn to the display during the run, back-pressure keeps memory flat,
