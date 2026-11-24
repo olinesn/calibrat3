@@ -117,6 +117,11 @@
                     <div class="config-panel">
                         <h3>Board <span id="boardSource" class="muted small"></span></h3>
                         <div class="config-row">
+                            <div class="config-item"><label title="A ChArUco board sold by calib.io fills in (and locks) the fields below; Custom unlocks them. Auto finds which calib.io board is in the video from its markers when you detect (the image can't tell two sizes of the same grid apart: then pick yours here, or type its square size in Square first). Also ?board=&lt;preset&gt; in the page URL, or preset = &quot;…&quot; in board.toml.">Board preset</label>
+                                <select id="boardPreset"><option value="custom" selected>Custom (enter below)</option></select></div>
+                            <div class="config-item"><span id="boardPresetInfo" class="muted small"></span></div>
+                        </div>
+                        <div class="config-row">
                             <div class="config-item"><label>Squares X</label><input type="number" id="boardX" value="8" min="3" max="40"></div>
                             <div class="config-item"><label>Squares Y</label><input type="number" id="boardY" value="11" min="3" max="40"></div>
                             <div class="config-item"><label title="Side of one chessboard square, in whatever unit you want the calibration in (mm here, or m as in anipose configs). Every 3D coordinate and translation inherits this unit.">Square (units)</label><input type="number" id="squareLength" value="24" step="any" min="0"></div>

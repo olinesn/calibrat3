@@ -11,6 +11,8 @@
 import { state, controllers, resetDownstreamOfDetection, viewNames, cameraColor } from './app-state.js';
 import { DetectionStore } from '../calib/detection-store.js';
 import { normalizeBoard, numCorners, numMarkers, legacyPatternDiffers } from '../calib/board.js';
+import { CALIBIO_PRESETS, presetById, presetBoard, presetForBoard } from '../calib/board-presets.js';
+import { identifyCalibioBoard } from '../calib/board-identify.js';
 import { stridedFrames } from '../calib/frame-selection.js';
 import { log, fmtMs } from './log-panel.js';
 import { $, el, intInput, numInput, setStageStatus, expandStage, setEnabled, showError, Progress, errorColor } from './stages.js';
@@ -21,14 +23,24 @@ import { registerKeyHandler } from './video-panel.js';
 
 const MAX_INFLIGHT_PER_VIEW = 2;   // frames handed to the pool but not yet returned, per view
 const THUMB_WIDTH = 160;
+const BOARD_FIELDS = ['boardX', 'boardY', 'squareLength', 'markerLength', 'arucoDict', 'boardPattern'];
+// Auto (calib.io): dictionaries searched, in order (stop at the first with AUTO_ENOUGH markers), and
+// how many frames (current first, then spread over the sampled ones) it may look at.
+const AUTO_DICTS = ['DICT_5X5_1000', 'DICT_4X4_1000', 'DICT_6X6_1000'];
+const AUTO_ENOUGH = 4;
+const AUTO_MAX_FRAMES = 12;
+
+let urlPreset = null;          // ?board= in the page URL: wins over a board.toml
+let autoObservations = null;   // Auto's marker detections so far (cleared when a session opens)
 
 let strip = null, table = null, progress = null;
 
 export function setupDetectStage() {
     progress = new Progress('detectionProgress');
-    for (const id of ['boardX', 'boardY', 'squareLength', 'markerLength', 'arucoDict', 'boardPattern']) {
-        $(id).addEventListener('change', onBoardFormChanged);
-    }
+    for (const id of BOARD_FIELDS) $(id).addEventListener('change', onBoardFormChanged);
+    buildPresetSelect();
+    $('boardPreset').addEventListener('change', () => applyPresetChoice($('boardPreset').value));
+    applyUrlBoard();
     onBoardFormChanged();
     $('targetSamples').addEventListener('input', updateSamplingInfo);
     $('allFramesCheck').addEventListener('change', updateSamplingInfo);
@@ -58,7 +70,7 @@ export function setupDetectStage() {
         emptyText: 'No frames match the filter',
     });
 
-    on('session-loaded', () => { updateSamplingInfo(); buildTableColumns(); state.liveDetection = null; $('detectionResults').style.display = 'none'; $('detectCurrentResult').textContent = ''; });
+    on('session-loaded', () => { autoObservations = null; updateSamplingInfo(); buildTableColumns(); state.liveDetection = null; $('detectionResults').style.display = 'none'; $('detectCurrentResult').textContent = ''; });
     on('frame', ({ frame }) => { strip.setCurrent(frame); if (state.detections && state.detections.has(frame)) table.setSelected(frame, { scroll: true }); });
 
     registerKeyHandler((e) => {
@@ -83,6 +95,11 @@ export function getBoardFromForm() {
     });
 }
 
+/**
+ * Fill the form from a board config (board.toml, saved session). The preset select follows:
+ * board.preset 'auto' selects Auto; values that are a calib.io board, value for value, select
+ * that preset; anything else is Custom.
+ */
 export function setBoardForm(board, sourceLabel = '') {
     if (board.boardX) $('boardX').value = board.boardX;
     if (board.boardY) $('boardY').value = board.boardY;
@@ -91,7 +108,162 @@ export function setBoardForm(board, sourceLabel = '') {
     if (board.dictName) $('arucoDict').value = board.dictName;
     if ($('boardPattern') && board.legacyPattern !== undefined) $('boardPattern').value = board.legacyPattern ? 'legacy' : (sourceLabel ? 'new' : $('boardPattern').value);
     $('boardSource').textContent = sourceLabel ? `(from ${sourceLabel})` : '';
+    let choice = 'custom';
+    if (board.preset === 'auto') choice = 'auto';
+    else { try { const p = presetForBoard(getBoardFromForm()); if (p) choice = p.id; } catch (_) { /* invalid values: Custom */ } }
+    applyPresetChoice(choice, { fill: false });
+}
+
+// ---- board presets (calib/board-presets.js) ---------------------------------------
+
+/** 'custom' | 'auto' | a preset id. */
+export function boardPresetChoice() { return $('boardPreset') ? $('boardPreset').value : 'custom'; }
+
+/** The ?board= of the page URL when it set a preset or Auto (a board.toml then doesn't), else null. */
+export function boardSetByUrl() { return urlPreset; }
+
+function buildPresetSelect() {
+    const sel = $('boardPreset');
+    const groups = [];
+    for (const p of CALIBIO_PRESETS) {
+        const name = `calib.io ChArUco, ${p.pattern}${p.material === 'ceramic' ? ' (ceramic)' : ''}`;
+        let g = groups.find(x => x.name === name);
+        if (!g) { g = { name, items: [] }; groups.push(g); }
+        g.items.push(el('option', { value: p.id, title: `${p.label}, ${p.markerLength} mm markers, ${p.dictName} (${p.sku}; ${p.source})` },
+            `${p.plate[0]} × ${p.plate[1]} mm — ${p.rows} × ${p.cols}, ${p.squareLength} mm squares (${p.sku})`));
+    }
+    sel.replaceChildren(
+        el('option', { value: 'custom' }, 'Custom (enter below)'),
+        el('option', { value: 'auto' }, 'Auto: identify a calib.io board'),
+        ...groups.map(g => el('optgroup', { label: g.name }, g.items)),
+    );
+    sel.value = 'custom';
+}
+
+/**
+ * Select a preset choice. A preset fills the fields (unless `fill` is false: they already hold
+ * its values) and locks them; Custom and Auto unlock them (Auto reads Square as a size hint).
+ */
+function applyPresetChoice(choice, { fill = true } = {}) {
+    const p = presetById(choice);
+    const value = p ? p.id : (choice === 'auto' ? 'auto' : 'custom');
+    $('boardPreset').value = value;
+    if (p && fill) {
+        const b = presetBoard(p);
+        $('boardX').value = b.boardX; $('boardY').value = b.boardY;
+        $('squareLength').value = b.squareLength; $('markerLength').value = b.markerLength;
+        $('arucoDict').value = b.dictName;
+        $('boardPattern').value = b.legacyPattern ? 'legacy' : 'new';
+    }
+    for (const id of BOARD_FIELDS) $(id).disabled = !!p;
+    $('boardPresetInfo').textContent = p
+        ? `${p.sku} · ${p.material} · ${p.markerLength} mm markers · ${p.dictName} — Custom to edit`
+        : value === 'auto'
+            ? 'identified from the markers when you detect; if Square holds one of calib.io\'s square sizes, it picks the size'
+            : '';
     onBoardFormChanged();
+}
+
+/** ?board=<preset id | SKU | auto | custom> (and ?square=<mm>, Auto's size hint) from the page URL. */
+function applyUrlBoard() {
+    let params;
+    try { params = new URLSearchParams(globalThis.location ? location.search : ''); } catch (_) { return; }
+    const v = params.get('board');
+    const square = params.get('square');
+    if (square !== null) {
+        if (Number(square) > 0) $('squareLength').value = Number(square);
+        else showError(`?square=${square}: not a square size`);
+    }
+    if (v === null) return;
+    const key = v.trim().toLowerCase();
+    if (key !== 'auto' && key !== 'custom' && !presetById(key)) {
+        showError(`?board=${v}: unknown board preset (known: auto, custom, ${CALIBIO_PRESETS.map(p => p.id).join(', ')}, or a calib.io SKU)`);
+        return;
+    }
+    const choice = presetById(key) ? presetById(key).id : key;
+    applyPresetChoice(choice);
+    if (choice === 'custom') return;          // nothing to hold: a board.toml still fills the form
+    urlPreset = choice;
+    $('boardSource').textContent = '(from the page URL)';
+    log(`Board preset from the page URL: ${choice}${presetById(key) ? ` — ${presetById(key).label}` : ''} (a board.toml in the session folder won't replace it)`);
+}
+
+/** The Square field as Auto's size hint, or null. */
+function squareHint() {
+    const v = parseFloat($('squareLength').value);
+    return Number.isFinite(v) && v > 0 ? v : null;
+}
+
+/** Frames Auto may look at: the current one, then up to AUTO_MAX_FRAMES - 1 spread over the planned ones. */
+function autoFrames() {
+    const out = [state.currentFrame];
+    const planned = state.totalFrames ? plannedFrames().frames : [];
+    const want = Math.min(AUTO_MAX_FRAMES - 1, planned.length);
+    for (let k = 0; k < want; k++) {
+        const f = planned[Math.floor(((k + 0.5) * planned.length) / want)];
+        if (f !== undefined && !out.includes(f)) out.push(f);
+    }
+    return out;
+}
+
+/**
+ * Find which calib.io board the videos show: ArUco markers of each view on the current frame,
+ * then on more frames until calib/board-identify.js decides (or AUTO_MAX_FRAMES).
+ */
+async function identifyBoardFromVideo() {
+    const pool = controllers.pool;
+    await pool.init();
+    const obs = autoObservations || [];
+    const done = new Set(obs.map(o => o.frame));
+    let r = identifyCalibioBoard(obs, { squareHint: squareHint() });
+    if (r.status === 'match' || r.status === 'size-ambiguous') return r;
+    let framesWithMarkers = new Set(obs.filter(o => o.ids.length).map(o => o.frame)).size;
+    for (const frame of autoFrames()) {
+        if (done.has(frame)) continue;
+        done.add(frame);
+        const res = await Promise.all(state.views.map(async (view, v) => {
+            const fr = await view.decoder.getFrame(frame);
+            if (!fr) return null;
+            const copy = await createImageBitmap(fr.bitmap);   // the cached bitmap must not be transferred away
+            return pool.markers({ frame, view: v, image: copy, width: view.canvas.width, height: view.canvas.height, dictNames: AUTO_DICTS, enough: AUTO_ENOUGH });
+        }));
+        let any = false;
+        for (const m of res) {
+            if (!m) continue;
+            for (const x of m.results) { obs.push({ frame, view: m.view, dictName: x.dictName, ids: x.ids, corners: x.corners }); if (x.ids.length) any = true; }
+        }
+        if (any) framesWithMarkers++;
+        autoObservations = obs;
+        r = identifyCalibioBoard(obs, { squareHint: squareHint() });
+        log(`Auto (calib.io), frame ${frame}: ${r.status} — ${r.reason}`, 'debug');
+        if (r.status === 'match' || r.status === 'size-ambiguous') break;
+        if (r.status === 'no-match' && framesWithMarkers >= 3) break;
+    }
+    return r;
+}
+
+/**
+ * With Auto selected, identify the board and select its preset; otherwise do nothing.
+ * Throws (with what to do) when it can't: no calib.io board (back to Custom), or a grid
+ * calib.io sells in several sizes (stays on Auto: pick the size, or type it in Square).
+ */
+async function resolvePreset() {
+    if (boardPresetChoice() !== 'auto') return;
+    const t0 = performance.now();
+    const r = await identifyBoardFromVideo();
+    if (r.status === 'match') {
+        applyPresetChoice(r.preset.id);
+        log(`Auto (calib.io): ${r.preset.label} (${r.preset.sku}), found in ${fmtMs(performance.now() - t0)} — ${r.reason}`, 'success');
+        return;
+    }
+    if (r.status === 'size-ambiguous') {
+        log(`Auto (calib.io): ${r.reason}`, 'warn');
+        throw new Error(`Auto (calib.io): the board is a ${r.grid.rows} × ${r.grid.cols} calib.io grid, sold as ${r.candidates.map(p => `${p.plate[0]} × ${p.plate[1]} mm (${p.squareLength} mm squares)`).join(' or ')}; ` +
+            'the video can\'t tell these sizes apart. Pick yours under Board preset, or type its square size in Square and detect again.');
+    }
+    applyPresetChoice('custom');
+    log(`Auto (calib.io): no calib.io board identified — ${r.reason}. Board preset is back on Custom.`, 'warn');
+    throw new Error(`Auto (calib.io): no calib.io board identified (${r.reason}). Board preset is back on Custom: enter the board's values.`);
 }
 
 /**
@@ -130,7 +302,8 @@ async function resolvePattern(board) {
 function onBoardFormChanged() {
     try {
         state.board = getBoardFromForm();
-        $('boardInfo').textContent = `${numCorners(state.board)} corners · ${numMarkers(state.board)} markers`;
+        const choice = boardPresetChoice();
+        $('boardInfo').textContent = `${numCorners(state.board)} corners · ${numMarkers(state.board)} markers${choice === 'auto' ? ' (until Auto identifies the board)' : ''}`;
         $('boardInfo').style.color = '';
         emit('board-changed', { board: state.board });
     } catch (e) {
@@ -161,6 +334,7 @@ export async function detectCurrentFrame() {
     const t0 = performance.now();
     try {
         $('detectCurrentResult').textContent = 'detecting…';
+        await resolvePreset();
         const board = await resolvePattern(getBoardFromForm());
         state.board = board;
         await pool.configure(board, { fastMarkers: $('fastDetectCheck').checked });
@@ -190,6 +364,8 @@ export async function runBatchDetection() {
     const vc = controllers.video;
     if (state.isPlaying) vc.stopPlayback();
     let board;
+    try { await resolvePreset(); }
+    catch (e) { showError(e.message); return; }
     try { board = await resolvePattern(getBoardFromForm()); state.board = board; }
     catch (e) { showError(`Board pattern probe failed: ${e.message}`); return; }
     const { frames, stride } = plannedFrames();

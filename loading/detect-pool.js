@@ -93,8 +93,36 @@ export class DetectorPool {
         });
     }
 
+    /**
+     * ArUco markers of `image` (TRANSFERRED, closed in the worker) in each dictionary of
+     * `dictNames` in turn, stopping after the first with `enough` markers. Needs no configure().
+     * @returns {Promise<{frame, view, ms, results:Array<{dictName, ids:Int32Array, corners:Float32Array}>}>}
+     */
+    markers({ frame, view, image, width, height, dictNames, enough = 0 }) {
+        if (!this.workers.length) return Promise.reject(new Error('DetectorPool: init() first'));
+        let idx = 0;
+        for (let i = 1; i < this.workers.length; i++) if (this.inFlight[i] < this.inFlight[idx]) idx = i;
+        const requestId = this.nextId++;
+        return new Promise((resolve, reject) => {
+            this.pending.set(requestId, { resolve, reject, workerIdx: idx });
+            this.inFlight[idx]++;
+            const msg = { type: 'markers', requestId, frame, view, image, width, height, dictNames, enough };
+            try { this.workers[idx].postMessage(msg, [image]); }
+            catch (e) {
+                try { this.workers[idx].postMessage(msg); }
+                catch (e2) { this.pending.delete(requestId); this.inFlight[idx]--; reject(e2); }
+            }
+        });
+    }
+
     _onMessage(workerIdx, msg) {
-        if (msg.type === 'result') {
+        if (msg.type === 'markers') {
+            const p = this.pending.get(msg.requestId);
+            if (!p) return;
+            this.pending.delete(msg.requestId);
+            this.inFlight[p.workerIdx]--;
+            p.resolve(msg);
+        } else if (msg.type === 'result') {
             const p = this.pending.get(msg.requestId);
             if (!p) return;
             this.pending.delete(msg.requestId);

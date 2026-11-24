@@ -14,6 +14,7 @@
  */
 
 import { dictNameFromToml, tomlFromDictName } from '../calib/board.js';
+import { presetById, presetForBoard, CALIBIO_PRESETS } from '../calib/board-presets.js';
 
 const f6 = v => Number(v).toFixed(6);
 const f10 = v => Number(v).toFixed(10);
@@ -62,6 +63,7 @@ export function generateBoardToml(board) {
         `marker_bits = ${d.markerBits}`,
         `dict_size = ${d.dictSize}`,
         ...(board.legacyPattern ? ['legacy_pattern = true   # OpenCV < 4.6 layout (even-row board starting with a white marker square)'] : []),
+        ...(presetForBoard(board) ? [`preset = "${presetForBoard(board).id}"   # ${presetForBoard(board).sku}, the values above`] : []),
         '',
     ].join('\n');
 }
@@ -70,6 +72,13 @@ export function generateBoardToml(board) {
  * Parse board.toml into a board config. Accepts the sleap-anipose keys, case-insensitively
  * (board_x, board_y, square_length, marker_length, marker_bits, dict_size, plus legacy_pattern);
  * unknown keys are kept in `extra`.
+ *
+ * `preset = "<id or SKU>"` (calib/board-presets.js, e.g. "calibio-300x200-coarse" or
+ * "CCT300200C") fills every value the file leaves out from that calib.io board; values the
+ * file does give win (a square measured with calipers). `preset = "auto"` asks the app to
+ * identify the calib.io board from the video; the values the file gives are then only a hint
+ * (square_length picks the size). Either way `board.preset` is set ('auto' or the preset id).
+ * An unknown preset name throws.
  * @returns {{board: object, extra: object}}
  */
 export function parseBoardToml(text) {
@@ -84,6 +93,7 @@ export function parseBoardToml(text) {
             case 'square_length': board.squareLength = Number(v); break;
             case 'marker_length': board.markerLength = Number(v); break;
             case 'legacy_pattern': board.legacyPattern = v === true || v === 'true' || v === 1; break;
+            case 'preset': lower.preset = String(v); break;
             case 'marker_bits': lower.marker_bits = v; break;
             case 'dict_size': lower.dict_size = v; break;
             default: extra[k] = v;
@@ -92,6 +102,19 @@ export function parseBoardToml(text) {
     if (lower.marker_bits !== undefined && lower.dict_size !== undefined) {
         const name = dictNameFromToml(Number(lower.marker_bits), Number(lower.dict_size));
         if (name) board.dictName = name;
+    }
+    if (lower.preset !== undefined && lower.preset.trim().toLowerCase() === 'auto') {
+        board.preset = 'auto';
+    } else if (lower.preset !== undefined) {
+        const p = presetById(lower.preset);
+        if (!p) throw new Error(`board.toml: unknown preset "${lower.preset}" (known: auto, ${CALIBIO_PRESETS.map(x => x.id).join(', ')})`);
+        board.boardX ??= p.cols;
+        board.boardY ??= p.rows;
+        board.squareLength ??= p.squareLength;
+        board.markerLength ??= p.markerLength;
+        board.dictName ??= p.dictName;
+        board.legacyPattern ??= p.legacyPattern;
+        board.preset = p.id;
     }
     if (board.legacyPattern === undefined && Object.keys(board).length) board.legacyPattern = false;
     return { board, extra };

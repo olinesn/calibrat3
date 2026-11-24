@@ -204,6 +204,20 @@ detects the current frame with both layouts before batch detection and keeps the
 more corners; `board.toml` gains `legacy_pattern = true` when set. Its keys are parsed
 case-insensitively (`board_X` works).
 
+**calib.io presets.** `calib/board-presets.js` holds calib.io's 13 stock ChArUco boards (from
+https://calib.io/products/charuco-targets; what the page leaves out — dictionary size, first
+id, which of rows/columns is squares X — is stated in its header). Columns = squares X. All
+have odd rows, so the legacy layout never matters for them. The `Board preset` select
+defaults to Custom (DEFAULT_BOARD unchanged); a preset fills and locks the fields. **Auto**
+runs `detectMarkers` only (`pool.markers`, no board) and `calib/board-identify.js` scores
+each calib.io grid by whether neighbouring markers sit where the ids say, judged from each
+marker's own corners — not a whole-board homography, which fits a wrong column count on any
+patch without a board edge (a shear). The physical size is not observable from images
+without intrinsics: most grids are sold in 2-3 sizes, so Auto needs the Square field (or
+board.toml `square_length`, or `?square=`) to hold one of the candidates' square sizes, and
+otherwise stops with an error naming them. Headless: `?board=<id|SKU|auto>` (wins over
+board.toml) or board.toml `preset = "…"` (its explicit values win over the preset's).
+
 ## Dependencies (all vendored under `lib/`, each with `PROVENANCE.txt`)
 
 - **OpenCV.js 4.13.0** (`lib/opencv/opencv.js`, ~11 MB, single file with embedded
