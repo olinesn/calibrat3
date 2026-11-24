@@ -12,6 +12,11 @@
  *          wantThumb?:boolean, thumbWidth?:number}
  *   <- {type:'result', requestId, frame, view, ids:Int32Array, corners:Float32Array,
  *          numMarkers, ms, timings:{convert,markers,charuco}, thumb: Blob|null}
+ *   -> {type:'markers', requestId, frame, view, image, width, height, dictNames:string[], enough?:number}
+ *   <- {type:'markers', requestId, frame, view, ms, results:[{dictName, ids:Int32Array,
+ *          corners:Float32Array(8 per marker, the detector's TL, TR, BR, BL order)}]}
+ *      ArUco markers only (no board needed, nothing to configure first): each dictionary in
+ *      turn, stopping after the first that finds `enough` markers. Used to identify a board.
  *   <- {type:'error', requestId?, error}
  *   <- {type:'ready'}   once OpenCV is initialized
  *   <- {type:'log', level, msg}
@@ -76,7 +81,8 @@ function handle(msg) {
         switch (msg.type) {
             case 'configure': configure(msg.board, msg.options || {}); break;
             case 'detect': detect(msg); break;
-            case 'close': dispose(); close(); break;
+            case 'markers': findMarkers(msg); break;
+            case 'close': dispose(); disposeMarkerDetectors(); close(); break;
             default: postMessage({ type: 'error', error: `unknown message type ${msg.type}` });
         }
     } catch (err) {
@@ -225,4 +231,67 @@ function detect(msg) {
         }, [ids.buffer, corners.buffer]);
     };
     if (thumbPromise) thumbPromise.then(send, () => send(null)); else send(thumb);
+}
+
+// ---- markers only (board identification) -------------------------------------------
+
+const markerDetectors = new Map();   // dictName -> {dictionary, params, detector}
+
+function disposeMarkerDetectors() {
+    for (const d of markerDetectors.values()) {
+        for (const k of ['detector', 'params', 'dictionary']) { try { d[k] && d[k].delete(); } catch (_) { /* */ } }
+    }
+    markerDetectors.clear();
+}
+
+function markerDetector(dictName) {
+    let d = markerDetectors.get(dictName);
+    if (d) return d;
+    const dictId = DICT_IDS()[dictName];
+    if (dictId === undefined) throw new Error(`Unknown dictionary ${dictName}`);
+    const dictionary = CV.getPredefinedDictionary(dictId);
+    const params = new CV.aruco_DetectorParameters();
+    const refine = new CV.aruco_RefineParameters(10.0, 3.0, true);
+    const detector = new CV.aruco_ArucoDetector(dictionary, params, refine);
+    refine.delete();
+    d = { dictionary, params, detector };
+    markerDetectors.set(dictName, d);
+    return d;
+}
+
+function findMarkers(msg) {
+    const t0 = performance.now();
+    const { requestId, frame, view, image, width, height } = msg;
+    const w = width || image.displayWidth || image.width;
+    const h = height || image.displayHeight || image.height;
+    ensureCanvas(w, h);
+    ctx.drawImage(image, 0, 0, w, h);
+    if (typeof image.close === 'function') image.close();
+    const src = CV.matFromImageData(ctx.getImageData(0, 0, w, h));
+    const gray = new CV.Mat();
+    CV.cvtColor(src, gray, CV.COLOR_RGBA2GRAY);
+    src.delete();
+    const results = [], transfer = [];
+    try {
+        for (const dictName of msg.dictNames || []) {
+            const d = markerDetector(dictName);
+            const mc = new CV.MatVector(), mi = new CV.Mat(), rej = new CV.MatVector();
+            d.detector.detectMarkers(gray, mc, mi, rej);
+            const n = mi.rows;
+            const ids = new Int32Array(n), corners = new Float32Array(n * 8);
+            for (let m = 0; m < n; m++) {
+                ids[m] = mi.intAt(m, 0);
+                const c = mc.get(m);
+                corners.set(c.data32F.subarray(0, 8), m * 8);
+                c.delete();
+            }
+            mc.delete(); mi.delete(); rej.delete();
+            results.push({ dictName, ids, corners });
+            transfer.push(ids.buffer, corners.buffer);
+            if (msg.enough && n >= msg.enough) break;
+        }
+    } finally {
+        gray.delete();
+    }
+    postMessage({ type: 'markers', requestId, frame, view, ms: performance.now() - t0, results }, transfer);
 }
